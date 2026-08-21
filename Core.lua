@@ -670,7 +670,9 @@ local function StackPlates()
 
 	for i = #stackList, 1, -1 do stackList[i] = nil end
 	for _, f in pairs(Core.active) do
-		if f:IsShown() and f.baseX then
+		-- a plate with no footprint cannot take part in collision testing, and
+		-- letting one in would take the whole pass down with a nil arithmetic
+		if f:IsShown() and f.baseX and f.baseY and f.halfW and f.halfH then
 			stackList[#stackList + 1] = f
 			f.stackTargetY = 0
 		end
@@ -692,7 +694,7 @@ local function StackPlates()
 			passes = passes + 1
 			for j = 1, i - 1 do
 				local b = stackList[j]
-				local by = b.baseY + b.stackTargetY
+				local by = b.baseY + (b.stackTargetY or 0)
 				-- The gap counts horizontally as well. Testing for strict
 				-- overlap left plates that were merely touching edge to edge
 				-- exactly where they were, which still reads as one run-on bar.
@@ -1396,13 +1398,22 @@ runner:SetScript("OnUpdate", function(self, elapsed)
 	-- between them, then ease each one towards its resolved spot.
 	-- Guarded, because this runs on every rendered frame: an unprotected error
 	-- in here does not fail once, it fails sixty times a second.
+	-- Each phase is guarded separately. Sharing one pcall across all three meant
+	-- a single frame failing to work out its target silently skipped stacking
+	-- and positioning for every plate on screen - and because errors are
+	-- deduplicated, it said so once and then looked like a missing feature
+	-- rather than a fault.
 	local ok, err = pcall(function()
 		for _, f in pairs(Core.active) do
 			if f:IsShown() then ComputeTarget(f) end
 		end
+	end)
+	if not ok then Util.Error("ComputeTarget: " .. tostring(err)) end
 
-		StackPlates()
+	ok, err = pcall(StackPlates)
+	if not ok then Util.Error("StackPlates: " .. tostring(err)) end
 
+	ok, err = pcall(function()
 		for _, f in pairs(Core.active) do
 			if f:IsShown() then
 				ApplyPosition(f, elapsed)
@@ -1410,7 +1421,7 @@ runner:SetScript("OnUpdate", function(self, elapsed)
 			end
 		end
 	end)
-	if not ok then Util.Error(err) end
+	if not ok then Util.Error("ApplyPosition: " .. tostring(err)) end
 end)
 
 --------------------------------------------------------------------------------
@@ -1498,6 +1509,16 @@ function Core.DebugDump()
 		f.stackY or 0, #(f.regions.frames or {}), #(f.regions.nilable or {})))
 	Util.Print(string.format("  in combat: %s   click box pending: %s",
 		tostring(InCombatLockdown() and true or false), tostring(f.clickPending and true or false)))
+
+	Util.Print(string.format("  stacking %s, gap %d, %d plate(s) taking part:",
+		ns.db.stackPlates and "|cff66ff66on|r" or "|cffff5555off|r",
+		ns.db.stackSpacing, #stackList))
+	for i = 1, #stackList do
+		local s = stackList[i]
+		Util.Print(string.format("    [%d] %-16s base=(%.0f,%.0f) half=(%.0f,%.0f) lift=%.1f",
+			i, tostring(s.unitName), s.baseX or -1, s.baseY or -1,
+			s.halfW or -1, s.halfH or -1, s.stackTargetY or 0))
+	end
 	Util.Print("---- end ----")
 end
 
