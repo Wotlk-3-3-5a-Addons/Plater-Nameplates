@@ -45,6 +45,11 @@ ns.defaults = {
 	-- values make plates drift towards the unit instead of darting around.
 	smoothing    = 0.35,
 
+	-- anti-overlap. This client does not space nameplates apart, so the addon
+	-- lifts colliding plates clear of one another itself.
+	stackPlates  = true,
+	stackSpacing = 4,
+
 	-- clickable area ----------------------------------------------------------
 	-- The frame you click to target is Blizzard's plate, not our artwork. Sizing
 	-- that frame to match the health bar makes the bar clickable, and gives the

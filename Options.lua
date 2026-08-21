@@ -379,6 +379,14 @@ local function BuildGeneral(panel)
 		function() return db().smoothing end, function(v) db().smoothing = v end))
 
 	L:Gap()
+	L:Add(Widgets.Header(c, "Overlap"))
+	L:Add(Widgets.Text(c, "This client does not space nameplates apart on its own, so colliding plates are lifted clear of each other. The plate nearest the camera keeps its position and the ones behind it move up."))
+	L:Add(Widgets.CheckBox(c, "Stop nameplates overlapping", nil,
+		function() return db().stackPlates end, function(v) db().stackPlates = v end))
+	L:Add(Widgets.Slider(c, "Gap between stacked plates", 0, 30, 1,
+		function() return db().stackSpacing end, function(v) db().stackSpacing = v end))
+
+	L:Gap()
 	L:Add(Widgets.Header(c, "Clickable area"))
 	L:Add(Widgets.Text(c, "The frame you click to target is Blizzard's plate, not our artwork. Matching its size to the health bar makes the bar clickable, and gives the client's plate spacing the right dimensions so plates stop overlapping."))
 	L:Add(Widgets.CheckBox(c, "Resize the clickable area to fit the health bar", nil,

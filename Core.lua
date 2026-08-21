@@ -198,26 +198,33 @@ end
 
 -- Every region Blizzard draws, wherever it lives. Which frame owns the border /
 -- name / level artwork varies between 3.3.5a builds, and the client can create
--- regions after we first look, so this re-scans the plate and all of its
--- children rather than trusting a snapshot taken at hook time.
+-- regions after we first look, so this walks the whole plate rather than
+-- trusting a snapshot taken at hook time. It recurses: a border drawn by a
+-- grandchild is exactly the sort of thing that survives a one-level sweep and
+-- leaves an empty outline floating on screen.
 function Core.CollectRegions(plate, o)
 	local all = o.allRegions
 	for i = #all, 1, -1 do all[i] = nil end
 
-	local function collect(frame)
-		if not frame then return end
+	local frames = o.frames
+	if not frames then frames = {}; o.frames = frames end
+	for i = #frames, 1, -1 do frames[i] = nil end
+
+	local function walk(frame, depth)
 		for i = 1, select("#", frame:GetRegions()) do
 			all[#all + 1] = select(i, frame:GetRegions())
 		end
+		if depth >= 4 then return end
+		for i = 1, select("#", frame:GetChildren()) do
+			local child = select(i, frame:GetChildren())
+			if child and not child.isPlaterWrathFrame then
+				frames[#frames + 1] = child
+				walk(child, depth + 1)
+			end
+		end
 	end
 
-	collect(plate)
-	for i = 1, select("#", plate:GetChildren()) do
-		local child = select(i, plate:GetChildren())
-		o.children = o.children or {}
-		o.children[i] = child
-		collect(child)
-	end
+	walk(plate, 0)
 end
 
 --------------------------------------------------------------------------------
@@ -230,9 +237,15 @@ end
 -- so our zero on the children survives.
 --------------------------------------------------------------------------------
 
+-- Run unconditionally on every update tick. Sampling a couple of representative
+-- widgets to decide whether anything needs re-hiding was too clever: the client
+-- restores its artwork piecemeal, so whichever widget you do not sample is the
+-- one that reappears. Blanking the lot outright is a few dozen SetAlpha calls
+-- per plate and removes the whole class of stray-artwork bug.
 local function HideBlizzardArt(o)
-	if o.children then
-		for i = 1, #o.children do o.children[i]:SetAlpha(0) end
+	local frames = o.frames
+	if frames then
+		for i = 1, #frames do frames[i]:SetAlpha(0) end
 	end
 	if o.health then o.health:SetAlpha(0) end
 	if o.cast then o.cast:SetAlpha(0) end
@@ -240,17 +253,6 @@ local function HideBlizzardArt(o)
 	if all then
 		for i = 1, #all do all[i]:SetAlpha(0) end
 	end
-end
-
--- Cheap per-tick check. The client re-shows and re-alphas its own artwork when
--- state changes - the threat glow flashing on as you take aggro is the obvious
--- one - so watching two representative widgets catches that within one frame
--- instead of leaving a stray red border on screen until the next full sweep.
-local function ArtDrifted(o)
-	if o.health and o.health:GetAlpha() ~= 0 then return true end
-	if o.threatGlow and o.threatGlow:GetAlpha() ~= 0 then return true end
-	if o.healthBorder and o.healthBorder:GetAlpha() ~= 0 then return true end
-	return false
 end
 
 --------------------------------------------------------------------------------
@@ -373,7 +375,7 @@ local function CreateUnitFrame(plate)
 	f.auraList = {}
 	f.auraScratch = {}
 	f.plate = plate
-	-- provisional anchor; PositionFrame replaces this CENTER point every tick
+	-- provisional anchor; ApplyPosition replaces this CENTER point every frame
 	f:SetPoint("CENTER", plate, "CENTER", 0, 0)
 	return f
 end
@@ -491,12 +493,22 @@ local function Calibrate(plate, health)
 	return true
 end
 
--- Size the plate frame so its clickable box matches the health bar we draw.
--- This is also what stops plates overlapping: the client spaces plates using
--- these dimensions, and by default they are narrower than our artwork.
-local function ApplyClickArea(f)
-	local db = ns.db
-	local plate = f.plate
+-- Move the plate's clickable box onto the health bar.
+--
+-- You cannot target from a frame of our own: that needs either a unit token,
+-- which 3.3.5a nameplates do not have, or a secure button whose macro text
+-- would have to be rewritten as units change - and secure attributes cannot be
+-- changed in combat, which is precisely when nameplates matter. So the click
+-- has to land on Blizzard's plate frame, and the plate frame has to be made to
+-- cover wherever we have drawn the bar.
+--
+-- Two steps, and the first is the one that was missing: grow the frame until it
+-- contains the bar, then trim it back to the bar's outline with insets. Insets
+-- alone were not enough. Asking for a rect outside the frame's own bounds means
+-- negative insets, and this client does not appear to honour those, so an
+-- offset bar ended up with its hit box still sitting up at the unit.
+local function ApplyClickBox(f)
+	local db, plate = ns.db, f.plate
 
 	f.origPlateW = f.origPlateW or plate:GetWidth()
 	f.origPlateH = f.origPlateH or plate:GetHeight()
@@ -504,62 +516,138 @@ local function ApplyClickArea(f)
 	if not db.resizeClickArea then
 		plate:SetWidth(f.origPlateW)
 		plate:SetHeight(f.origPlateH)
-		return
-	end
-
-	plate:SetWidth((db.clickWidth > 0) and db.clickWidth or db.width)
-	if db.clickHeight > 0 then plate:SetHeight(db.clickHeight) end
-end
-
--- Sizing the plate is not enough on its own: the client anchors it to the unit,
--- so once you offset the health bar the bar no longer sits over the hit box and
--- stops being clickable. Hit rect insets fix that - negative insets push an
--- edge outwards - so we shift the plate's clickable box onto wherever the bar
--- actually is, however far it has been offset.
-local function ApplyHitRect(f, scale)
-	local db, plate = ns.db, f.plate
-
-	if not db.resizeClickArea then
 		plate:SetHitRectInsets(0, 0, 0, 0)
+		f.clickW, f.clickH = nil, nil
 		return
 	end
 
 	local ps = plate:GetEffectiveScale()
 	if not ps or ps == 0 then return end
+	local fs = f:GetEffectiveScale() or ps
 
-	-- our artwork is measured in our frame's units; convert to the plate's
-	local r = ((f:GetEffectiveScale() or ps)) / ps
+	-- where the bar sits relative to the plate's centre, in the plate's units
 	local calib = Core.calib
-	local dx = (calib and calib.dx or 0) + db.xOffset * r
-	local dy = (calib and calib.dy or 0) + db.yOffset * r
+	local dx = (calib and calib.dx or 0) + (db.xOffset * fs) / ps
+	local dy = (calib and calib.dy or 0) + (db.yOffset * fs + (f.stackY or 0)) / ps
 
-	local halfW = ((db.clickWidth  > 0) and db.clickWidth  or db.width)  * r / 2
-	local halfH = ((db.clickHeight > 0) and db.clickHeight or db.height) * r / 2
+	local boxW = ((db.clickWidth  > 0) and db.clickWidth  or db.width)  * fs / ps
+	local boxH = ((db.clickHeight > 0) and db.clickHeight or db.height) * fs / ps
 
-	local pw = plate:GetWidth()  / 2
-	local ph = plate:GetHeight() / 2
+	-- Round the size so easing the stack offset does not resize the plate every
+	-- frame; resizing is the one thing here that could disturb its position.
+	local function quantize(v) return math.ceil(v / 8) * 8 end
+	local w = math.min(500, quantize(math.max(f.origPlateW, 2 * math.abs(dx) + boxW)))
+	local h = math.min(500, quantize(math.max(f.origPlateH, 2 * math.abs(dy) + boxH)))
 
+	if f.clickW ~= w or f.clickH ~= h then
+		-- Resizing is the one operation here that could disturb the plate's
+		-- position: if the client anchors plates by an edge rather than by the
+		-- centre, changing the height moves the centre we place our art from.
+		-- Measure it and carry the difference so the bar does not jump.
+		local beforeX, beforeY = plate:GetCenter()
+		plate:SetWidth(w)
+		plate:SetHeight(h)
+		local afterX, afterY = plate:GetCenter()
+		if beforeX and afterX then
+			f.sizeShiftX = (f.sizeShiftX or 0) + (afterX - beforeX)
+			f.sizeShiftY = (f.sizeShiftY or 0) + (afterY - beforeY)
+		end
+		f.clickW, f.clickH = w, h
+	end
+
+	-- now every inset is positive: we are only ever trimming inwards
+	local pw, ph = w / 2, h / 2
 	plate:SetHitRectInsets(
-		dx - halfW + pw,      -- left
-		pw - dx - halfW,      -- right
-		ph - dy - halfH,      -- top
-		dy - halfH + ph)      -- bottom
+		dx - boxW / 2 + pw,      -- left
+		pw - dx - boxW / 2,      -- right
+		ph - dy - boxH / 2,      -- top
+		dy - boxH / 2 + ph)      -- bottom
 end
 
-local function PositionFrame(f, dt)
+-- Where this plate's artwork wants to be, in screen pixels, before stacking and
+-- before easing. Also records the footprint the stacking pass needs.
+local function ComputeTarget(f)
 	local db = ns.db
 	local plate = f.plate
 
 	local px, py = plate:GetCenter()
-	if not px then return end
+	if not px then
+		f.baseX = nil
+		return false
+	end
 
-	local calib = Core.calib
-	local tx, ty = px, py
-	if calib then tx, ty = px + calib.dx, py + calib.dy end
-
-	-- work in screen pixels so easing is independent of either frame's scale
 	local ps = plate:GetEffectiveScale()
-	local targetX, targetY = tx * ps, ty * ps
+	local fs = f:GetEffectiveScale()
+	local calib = Core.calib
+
+	f.baseX = (px + (calib and calib.dx or 0) - (f.sizeShiftX or 0)) * ps + db.xOffset * fs
+	f.baseY = (py + (calib and calib.dy or 0) - (f.sizeShiftY or 0)) * ps + db.yOffset * fs
+
+	-- footprint includes the name drawn above the bar, so names stop colliding
+	-- with the bar above them and not just bar against bar
+	f.halfW = (db.width * fs) / 2
+	f.halfH = ((db.height + db.nameSize + 4) * fs) / 2
+	return true
+end
+
+-- The client does not space plates apart on this version, so we do it. Plates
+-- are laid out lowest first and each one is lifted until it clears everything
+-- already placed, which keeps the plate nearest the camera where it belongs.
+local stackList = {}
+
+local function StackPlates()
+	local db = ns.db
+
+	for i = #stackList, 1, -1 do stackList[i] = nil end
+	for _, f in pairs(Core.active) do
+		if f:IsShown() and f.baseX then
+			stackList[#stackList + 1] = f
+			f.stackTargetY = 0
+		end
+	end
+
+	local n = #stackList
+	if not db.stackPlates or n < 2 then return end
+
+	table.sort(stackList, function(a, b) return a.baseY < b.baseY end)
+
+	local spacing = db.stackSpacing
+	for i = 2, n do
+		local a = stackList[i]
+		local ay = a.baseY
+		local passes = 0
+		local moved = true
+		while moved and passes < 12 do
+			moved = false
+			passes = passes + 1
+			for j = 1, i - 1 do
+				local b = stackList[j]
+				local by = b.baseY + b.stackTargetY
+				if math.abs(a.baseX - b.baseX) < (a.halfW + b.halfW)
+					and math.abs(ay - by) < (a.halfH + b.halfH + spacing) then
+					ay = by + b.halfH + a.halfH + spacing
+					moved = true
+				end
+			end
+		end
+		a.stackTargetY = ay - a.baseY
+	end
+end
+
+local function ApplyPosition(f, dt)
+	if not f.baseX then return end
+	local db = ns.db
+
+	-- ease the stacking offset on its own short curve so plates slide apart
+	-- rather than popping when a neighbour appears
+	local wanted = f.stackTargetY or 0
+	if not f.stackY then
+		f.stackY = wanted
+	else
+		f.stackY = f.stackY + (wanted - f.stackY) * (1 - math.exp(-dt / 0.10))
+	end
+
+	local targetX, targetY = f.baseX, f.baseY + f.stackY
 
 	local tau = db.smoothing * 0.30
 	if not f.smoothX or tau <= 0
@@ -576,8 +664,7 @@ local function PositionFrame(f, dt)
 
 	local fs = f:GetEffectiveScale()
 	f:ClearAllPoints()
-	f:SetPoint("CENTER", WorldFrame, "BOTTOMLEFT",
-		f.smoothX / fs + db.xOffset, f.smoothY / fs + db.yOffset)
+	f:SetPoint("CENTER", WorldFrame, "BOTTOMLEFT", f.smoothX / fs, f.smoothY / fs)
 end
 
 --------------------------------------------------------------------------------
@@ -900,21 +987,17 @@ local function UpdatePlate(f)
 	local dt = Core.tickInterval or 0.03
 
 	-- Blizzard restores its own artwork as unit state changes and when a plate
-	-- is recycled onto a new unit. Catch that the moment it happens, and re-scan
-	-- for regions that did not exist when we first hooked the plate twice a second.
-	if ArtDrifted(r) then HideBlizzardArt(r) end
+	-- is recycled onto a new unit, so blank it every tick, and re-walk the plate
+	-- twice a second to pick up widgets that did not exist when we hooked it.
 	f.hideElapsed = (f.hideElapsed or 0) + dt
 	if f.hideElapsed >= 0.5 then
 		f.hideElapsed = 0
 		Core.CollectRegions(f.plate, r)
-		HideBlizzardArt(r)
 	end
+	HideBlizzardArt(r)
 
 	-- calibrate before touching the plate's size, then size the click box
-	if Calibrate(f.plate, r.health) and f.clickGeneration ~= Core.settingsGeneration then
-		f.clickGeneration = Core.settingsGeneration
-		ApplyClickArea(f)
-	end
+	Calibrate(f.plate, r.health)
 
 	-- identity ---------------------------------------------------------------
 	local name = r.name and r.name:GetText() or ""
@@ -1079,7 +1162,7 @@ local function UpdatePlate(f)
 	Scripting.RunHook("OnUpdate", f)
 
 	-- final scale / position / alpha -------------------------------------------------
-	-- scale first: PositionFrame divides by the frame's effective scale
+	-- scale first: ApplyPosition divides by the frame's effective scale
 	local scale = db.scale * cfg.scale * (isTarget and db.targetScale or 1)
 	if f.scriptScale then scale = f.scriptScale end
 	if math.abs((f.curScale or 0) - scale) > 0.001 then
@@ -1087,12 +1170,19 @@ local function UpdatePlate(f)
 		f.curScale = scale
 	end
 
-	-- the hit box follows the bar's size, scale and offset, so recompute it
-	-- whenever any of those change rather than every frame
-	if f.hitScale ~= scale or f.hitGeneration ~= Core.settingsGeneration then
+	-- the hit box follows the bar's size, scale, offset and stacking, so
+	-- recompute it whenever any of those move rather than every frame
+	local stackY = math.floor((f.stackY or 0) + 0.5)
+	-- calibration arrives a tick or two after the plate first shows, and the
+	-- click box is wrong until it does, so treat it as part of the key
+	local calibToken = Core.calib and 1 or 0
+	if f.hitScale ~= scale or f.hitGeneration ~= Core.settingsGeneration
+		or f.hitStackY ~= stackY or f.hitCalib ~= calibToken then
 		f.hitScale = scale
 		f.hitGeneration = Core.settingsGeneration
-		ApplyHitRect(f, scale)
+		f.hitStackY = stackY
+		f.hitCalib = calibToken
+		ApplyClickBox(f)
 	end
 
 	local alpha
@@ -1178,20 +1268,18 @@ end
 -- WorldFrame scanning + main loop
 --------------------------------------------------------------------------------
 
-local lastChildCount = 0
-
+-- Rejections are never permanent. A frame examined at the wrong moment - before
+-- the client has finished populating it - would otherwise be written off for the
+-- rest of the session and keep drawing Blizzard's artwork forever, which is
+-- exactly how a stray plate border ends up floating on screen with nothing in
+-- it. Retesting an unhooked child costs one early-exiting predicate.
 local function ScanWorldFrame()
 	local count = WorldFrame:GetNumChildren()
-	if count == lastChildCount then return end
-	lastChildCount = count
-
 	for i = 1, count do
 		local child = select(i, WorldFrame:GetChildren())
-		if child and not child.plwChecked then
-			if IsNamePlate(child) then
-				if InitializePlate(child) then child.plwChecked = true end
-			else
-				child.plwChecked = true
+		if child and not child.plwHooked and not child.isPlaterWrathFrame then
+			if IsNamePlate(child) and InitializePlate(child) then
+				child.plwHooked = true
 			end
 		end
 	end
@@ -1237,9 +1325,17 @@ runner:SetScript("OnUpdate", function(self, elapsed)
 	local doTimers = sinceTimers >= (ns.db.auras.timerRate or 0.03)
 	if doTimers then sinceTimers = 0 end
 
+	-- three phases: work out where each plate wants to be, resolve collisions
+	-- between them, then ease each one towards its resolved spot
+	for _, f in pairs(Core.active) do
+		if f:IsShown() then ComputeTarget(f) end
+	end
+
+	StackPlates()
+
 	for _, f in pairs(Core.active) do
 		if f:IsShown() then
-			PositionFrame(f, elapsed)
+			ApplyPosition(f, elapsed)
 			if doTimers then RefreshAuraTimers(f) end
 		end
 	end
@@ -1320,6 +1416,12 @@ function Core.DebugDump()
 		target:GetWidth(), target:GetHeight(),
 		tostring(f.origPlateW and math.floor(f.origPlateW)),
 		tostring(f.origPlateH and math.floor(f.origPlateH))))
+	Util.Print(string.format("  hit rect insets: %.1f %.1f %.1f %.1f",
+		target:GetHitRectInsets()))
+	Util.Print(string.format("  size shift compensation: x=%.1f y=%.1f",
+		f.sizeShiftX or 0, f.sizeShiftY or 0))
+	Util.Print(string.format("  stack offset: %.1f px   frames walked: %d",
+		f.stackY or 0, #(f.regions.frames or {})))
 	Util.Print("---- end ----")
 end
 
