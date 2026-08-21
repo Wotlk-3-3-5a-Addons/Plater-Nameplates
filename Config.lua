@@ -49,6 +49,10 @@ ns.defaults = {
 	-- lifts colliding plates clear of one another itself.
 	stackPlates  = true,
 	stackSpacing = 4,
+	-- Nameplates are protected frames, so their clickable box cannot be moved
+	-- during combat. Capping how far a plate is lifted keeps every bar inside
+	-- the box it already has, and keeps it near the body it belongs to.
+	clampStack   = true,
 
 	-- clickable area ----------------------------------------------------------
 	-- The frame you click to target is Blizzard's plate, not our artwork. Sizing

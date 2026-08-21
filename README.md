@@ -113,7 +113,9 @@ Script API (`Plater.` or `PlaterW.`): `SetNameplateColor`, `ResetNameplateColor`
    Nameplates are protected frames, so the client only lets an addon change that
    geometry **out of combat**. The box is set the moment combat drops and then left
    alone, which means a bar you offset a long way mid-fight may not become clickable
-   until the fight ends.
+   until the fight ends. For the same reason anti-overlap caps how far it lifts a
+   plate, so stacked bars stay inside the box they already have — see General →
+   Overlap → Keep stacked plates clickable.
 5. **No wago.io / WeakAuras-Companion.** Companion talks to retail Plater's import format
    and to a running WeakAuras install; neither applies here. Import/export uses this
    addon's own plain-Lua format.

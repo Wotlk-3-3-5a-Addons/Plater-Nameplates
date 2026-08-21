@@ -668,13 +668,41 @@ local function ComputeTarget(f)
 
 	f.halfW = (math.max(db.width, nameW) * fs) / 2
 	f.halfH = ((db.height + db.nameSize + 4) * fs) / 2
+
+	-- How far this bar can be lifted and still sit inside its plate's clickable
+	-- box. The client will not let us move that box during combat, so anything
+	-- beyond this is a bar you cannot click until the fight ends.
+	local plateH = (f.plate:GetHeight() or 0) * ps
+	f.stackLimit = math.max(0, plateH / 2 - (db.height * fs) / 2 - 2)
 	return true
 end
 
 -- The client does not space plates apart on this version, so we do it. Plates
--- are laid out lowest first and each one is lifted until it clears everything
--- already placed, which keeps the plate nearest the camera where it belongs.
+-- are laid out lowest first and each one lifted until it clears everything
+-- already placed. Two things then temper the result:
+--
+--   * a run of colliding plates is recentred on where it started, so a group
+--     spreads both ways rather than growing upwards off its units. This halves
+--     how far any one plate has to travel, which matters most at range, where
+--     mobs bunch up on screen and the raw lift can carry a bar well away from
+--     the body it belongs to.
+--   * each lift is capped to what its plate's clickable box can still cover,
+--     because that box cannot be moved during combat.
 local stackList = {}
+local stackParent = {}
+
+local function ClusterRoot(i)
+	while stackParent[i] ~= i do
+		stackParent[i] = stackParent[stackParent[i]]
+		i = stackParent[i]
+	end
+	return i
+end
+
+local function ClusterJoin(a, b)
+	local ra, rb = ClusterRoot(a), ClusterRoot(b)
+	if ra ~= rb then stackParent[rb] = ra end
+end
 
 local function StackPlates()
 	local db = ns.db
@@ -693,6 +721,9 @@ local function StackPlates()
 	if not db.stackPlates or n < 2 then return end
 
 	table.sort(stackList, function(a, b) return a.baseY < b.baseY end)
+
+	for i = 1, n do stackParent[i] = i end
+	for i = n + 1, #stackParent do stackParent[i] = nil end
 
 	local spacing = db.stackSpacing
 	for i = 2, n do
@@ -713,10 +744,42 @@ local function StackPlates()
 					and math.abs(ay - by) < (a.halfH + b.halfH + spacing) then
 					ay = by + b.halfH + a.halfH + spacing
 					moved = true
+					ClusterJoin(i, j)
 				end
 			end
 		end
 		a.stackTargetY = ay - a.baseY
+	end
+
+	-- Recentre each run of colliding plates on where it started. Without this
+	-- the whole group climbs away from its units, and the more crowded the
+	-- screen the further it climbs.
+	local sum, count = {}, {}
+	for i = 1, n do
+		local root = ClusterRoot(i)
+		sum[root] = (sum[root] or 0) + stackList[i].stackTargetY
+		count[root] = (count[root] or 0) + 1
+	end
+	for i = 1, n do
+		local root = ClusterRoot(i)
+		stackList[i].stackTargetY = stackList[i].stackTargetY - sum[root] / count[root]
+	end
+
+	-- Keep every bar inside the hit box its plate already has. That box is
+	-- fixed for the duration of a fight, so a bar lifted past it is a bar you
+	-- cannot click until combat drops.
+	if db.clampStack then
+		for i = 1, n do
+			local f = stackList[i]
+			local limit = f.stackLimit or 0
+			if limit > 0 then
+				if f.stackTargetY > limit then
+					f.stackTargetY = limit
+				elseif f.stackTargetY < -limit then
+					f.stackTargetY = -limit
+				end
+			end
+		end
 	end
 end
 
@@ -1544,9 +1607,9 @@ function Core.DebugDump()
 		ns.db.stackSpacing, #stackList))
 	for i = 1, #stackList do
 		local s = stackList[i]
-		Util.Print(string.format("    [%d] %-16s base=(%.0f,%.0f) half=(%.0f,%.0f) lift=%.1f",
+		Util.Print(string.format("    [%d] %-16s base=(%.0f,%.0f) half=(%.0f,%.0f) lift=%.1f limit=%.1f",
 			i, tostring(s.unitName), s.baseX or -1, s.baseY or -1,
-			s.halfW or -1, s.halfH or -1, s.stackTargetY or 0))
+			s.halfW or -1, s.halfH or -1, s.stackTargetY or 0, s.stackLimit or 0))
 	end
 	Util.Print("---- end ----")
 end

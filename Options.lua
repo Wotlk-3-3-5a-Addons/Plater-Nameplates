@@ -385,6 +385,9 @@ local function BuildGeneral(panel)
 		function() return db().stackPlates end, function(v) db().stackPlates = v end))
 	L:Add(Widgets.Slider(c, "Gap between stacked plates", 0, 30, 1,
 		function() return db().stackSpacing end, function(v) db().stackSpacing = v end))
+	L:Add(Widgets.CheckBox(c, "Keep stacked plates clickable", nil,
+		function() return db().clampStack end, function(v) db().clampStack = v end))
+	L:Add(Widgets.Text(c, "Nameplates are protected frames, so the client will not let the clickable box move during combat. This caps how far a plate is lifted so its bar stays inside the box it already has, and stays near its unit. Turning it off separates crowded plates more, at the cost of the ones moved furthest not being clickable until the fight ends."))
 
 	L:Gap()
 	L:Add(Widgets.Header(c, "Clickable area"))
