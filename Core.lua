@@ -31,6 +31,13 @@ ns.Core = Core
 Core.active   = {}   -- [plate] = unitFrame
 Core.allPlates = {}  -- [plate] = true
 
+-- A unit has exactly one nameplate, so a guid may be bound to exactly one
+-- frame. Keeping the reverse map makes that enforceable in one lookup, and
+-- enforcing it is what stops two plates claiming the same unit's auras.
+Core.guidOwner = {}  -- [guid] = unitFrame
+-- how many visible plates currently carry each name, rebuilt every tick
+Core.nameCounts = {}
+
 local WorldFrame  = WorldFrame
 local UnitExists  = UnitExists
 local UnitName    = UnitName
@@ -1126,6 +1133,37 @@ end
 -- the per-plate update
 --------------------------------------------------------------------------------
 
+--------------------------------------------------------------------------------
+-- guid binding
+--------------------------------------------------------------------------------
+
+local function UnbindGUID(f)
+	if f.unitGUID and Core.guidOwner[f.unitGUID] == f then
+		Core.guidOwner[f.unitGUID] = nil
+	end
+	f.unitGUID, f.guidName = nil, nil
+end
+
+-- Binding is exclusive. Reading a guid off the target or the mouseover can
+-- briefly land on the wrong plate - two mobs share a name, both are near full
+-- alpha for a frame while the client fades them - and a stale binding would
+-- then quietly feed one unit's auras to another plate for as long as it lived.
+-- Handing the guid over rather than copying it makes that self-correcting.
+local function BindGUID(f, guid, name)
+	if f.unitGUID == guid then
+		f.guidName = name
+		return
+	end
+
+	UnbindGUID(f)
+
+	local previous = Core.guidOwner[guid]
+	if previous and previous ~= f then UnbindGUID(previous) end
+
+	f.unitGUID, f.guidName = guid, name
+	Core.guidOwner[guid] = f
+end
+
 local function TruncateName(name)
 	local db = ns.db
 	if db.abbreviateNames then
@@ -1210,17 +1248,26 @@ local function UpdatePlate(f)
 	end
 
 	if guid then
-		f.unitGUID, f.guidName = guid, name
+		BindGUID(f, guid, name)
 	elseif f.unitGUID and f.guidName ~= name then
 		-- recycled onto a different unit; the old binding is meaningless now
-		f.unitGUID, f.guidName = nil, nil
+		UnbindGUID(f)
 	end
 
 	if not f.unitGUID then
-		-- only when the name is unambiguous: with two mobs sharing a name there
-		-- is no safe answer, and guessing is the bug this replaced
-		local unique = Cache.UniqueGUIDForName(name)
-		if unique then f.unitGUID, f.guidName = unique, name end
+		-- The name-based shortcut, and it needs both halves of "unambiguous".
+		--
+		-- Knowing only one guid for a name is not enough: line up two mobs with
+		-- the same name, hit one, and its guid is the only one the combat log
+		-- has ever mentioned - so both plates would claim it, and both would
+		-- show the one mob's auras. Require that this is also the only plate on
+		-- screen wearing the name, and that no other plate already owns the guid.
+		if (Core.nameCounts[name] or 0) <= 1 then
+			local unique = Cache.UniqueGUIDForName(name)
+			if unique and not Core.guidOwner[unique] then
+				BindGUID(f, unique, name)
+			end
+		end
 	end
 
 	-- health ------------------------------------------------------------------
@@ -1410,8 +1457,11 @@ local function OnPlateShow(plate)
 	-- drop the easing history so it snaps into place instead of gliding there
 	f.smoothX, f.smoothY = nil, nil
 	f.scriptColor, f.scriptBorderColor, f.scriptName = nil, nil, nil
-	-- a recycled plate serves a different unit; drop the old identity so it
+	-- a recycled plate serves a different unit; release the old identity so it
 	-- cannot inherit the previous occupant's auras
+	if f.unitGUID and Core.guidOwner[f.unitGUID] == f then
+		Core.guidOwner[f.unitGUID] = nil
+	end
 	f.unitGUID, f.guidName = nil, nil
 
 	if f.constructorGeneration ~= constructorGeneration then
@@ -1501,6 +1551,21 @@ runner:SetScript("OnUpdate", function(self, elapsed)
 	if sinceUpdate >= ns.db.updateInterval then
 		Core.tickInterval = sinceUpdate
 		sinceUpdate = 0
+
+		-- Count how many visible plates share each name before updating any of
+		-- them. A plate can only be matched to a unit by name when it is the
+		-- only one wearing that name, and it cannot know that on its own.
+		local counts = Core.nameCounts
+		wipe(counts)
+		for plate, f in pairs(Core.active) do
+			if plate:IsShown() and f.regions and f.regions.name then
+				local plateName = f.regions.name:GetText()
+				if plateName and plateName ~= "" then
+					counts[plateName] = (counts[plateName] or 0) + 1
+				end
+			end
+		end
+
 		for plate, f in pairs(Core.active) do
 			if plate:IsShown() then
 				local ok, err = pcall(UpdatePlate, f)
@@ -1634,6 +1699,9 @@ function Core.DebugDump()
 		f.stackY or 0, #(f.regions.frames or {}), #(f.regions.nilable or {})))
 	Util.Print(string.format("  in combat: %s   click box pending: %s",
 		tostring(InCombatLockdown() and true or false), tostring(f.clickPending and true or false)))
+	Util.Print(string.format("  matched unit: %s   plates sharing this name: %d   auras shown: %d",
+		tostring(f.unitGUID or "not matched"),
+		Core.nameCounts[f.unitName or ""] or 0, f.auraCount or 0))
 
 	Util.Print(string.format("  stacking %s, gap %d, %d plate(s) taking part:",
 		ns.db.stackPlates and "|cff66ff66on|r" or "|cffff5555off|r",
