@@ -646,9 +646,16 @@ local function ComputeTarget(f)
 	f.baseX = hx * ps + db.xOffset * fs
 	f.baseY = hy * ps + db.yOffset * fs
 
-	-- footprint includes the name drawn above the bar, so names stop colliding
-	-- with the bar above them and not just bar against bar
-	f.halfW = (db.width * fs) / 2
+	-- The footprint is what the plate actually occupies on screen, not just the
+	-- bar: the name is drawn above the bar and is often wider than it, so two
+	-- plates whose bars merely sit side by side can still have their names run
+	-- into each other.
+	local nameW = 0
+	if f.nameText and f.nameText:IsShown() then
+		nameW = f.nameText:GetStringWidth() or 0
+	end
+
+	f.halfW = (math.max(db.width, nameW) * fs) / 2
 	f.halfH = ((db.height + db.nameSize + 4) * fs) / 2
 	return true
 end
@@ -686,7 +693,10 @@ local function StackPlates()
 			for j = 1, i - 1 do
 				local b = stackList[j]
 				local by = b.baseY + b.stackTargetY
-				if math.abs(a.baseX - b.baseX) < (a.halfW + b.halfW)
+				-- The gap counts horizontally as well. Testing for strict
+				-- overlap left plates that were merely touching edge to edge
+				-- exactly where they were, which still reads as one run-on bar.
+				if math.abs(a.baseX - b.baseX) < (a.halfW + b.halfW + spacing)
 					and math.abs(ay - by) < (a.halfH + b.halfH + spacing) then
 					ay = by + b.halfH + a.halfH + spacing
 					moved = true
