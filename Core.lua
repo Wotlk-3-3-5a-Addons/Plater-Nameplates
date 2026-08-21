@@ -633,10 +633,18 @@ local function ComputeTarget(f)
 	-- Blizzard's health bar is the reference: it is the widget we are replacing,
 	-- so sitting exactly on it is by definition correct, and it needs no
 	-- knowledge of how the plate frame is laid out or anchored.
+	-- Note the deliberately plain call. Written as `health and health:GetCenter()`
+	-- the `and` truncates the call to a single return value, so the y coordinate
+	-- silently comes back nil however healthy the frame is.
 	local health = f.regions.health
-	local hx, hy = health and health:GetCenter()
-	if not hx then
-		f.baseX = nil
+	if not health then
+		f.baseX, f.baseY = nil, nil
+		return false
+	end
+
+	local hx, hy = health:GetCenter()
+	if not hx or not hy then
+		f.baseX, f.baseY = nil, nil
 		return false
 	end
 
@@ -1493,8 +1501,9 @@ function Core.DebugDump()
 		tostring(f.regions.highlight ~= nil), tostring(f.regions.raidIcon ~= nil)))
 	Util.Print(string.format("  total regions blanked: %d", #(f.regions.allRegions or {})))
 	local px, py = target:GetCenter()
-	local hx, hy = f.regions.health and f.regions.health:GetCenter()
-	if px and hx then
+	local hx, hy
+	if f.regions.health then hx, hy = f.regions.health:GetCenter() end
+	if px and hx and hy then
 		Util.Print(string.format("  health bar relative to plate centre: dx=%.1f dy=%.1f", hx - px, hy - py))
 	else
 		Util.Print("  health bar centre unavailable")
