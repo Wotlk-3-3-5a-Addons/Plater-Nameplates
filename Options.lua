@@ -1246,14 +1246,27 @@ SlashCmdList["PLATERWRATH"] = function(input)
 			Util.Print("nothing tracked on " .. (UnitName("target") or "your target") .. " right now.")
 			return
 		end
-		Util.Print("tracked on |cffffd100" .. (UnitName("target") or "?") .. "|r:")
+		Util.Print("tracked on |cffffd100" .. (UnitName("target") or "?") .. "|r "
+			.. "|cff888888(hover a link to see the spell and its icon)|r:")
 		for _, aura in pairs(bucket) do
-			Util.Print(("   %s%s|r  %s%s"):format(
-				aura.mine and "|cff66ff66" or "|cffaaaaaa",
-				tostring(aura.name),
+			-- A spell link is hoverable, so the icon in chat can be checked
+			-- against the icon on the nameplate. Several spells share artwork -
+			-- Shadow Mastery wears Shadow Bolt's - and picking a name off the
+			-- picture alone is how the wrong spell ends up blacklisted.
+			local label = tostring(aura.name)
+			if aura.spellId then
+				local ok, link = pcall(GetSpellLink, aura.spellId)
+				if ok and link then label = link end
+			end
+
+			Util.Print(("   %s  %s  %s%s"):format(
+				label,
 				aura.type == "BUFF" and "buff" or "debuff",
+				aura.mine and "|cff66ff66yours|r" or "|cff888888someone else's|r",
 				ns.db.auras.blacklist[aura.name] and "  |cffff5555blacklisted|r" or ""))
 		end
+		Util.Print("hide one with |cffffd100/plater blacklist <name>|r, "
+			.. "or right click its icon on the nameplate.")
 		return
 	end
 
