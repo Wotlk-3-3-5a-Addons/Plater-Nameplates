@@ -483,15 +483,11 @@ end
 -- when its parent is resized, the plate's own centre does not.
 --------------------------------------------------------------------------------
 
-local function Calibrate(plate, health)
-	if Core.calib then return true end
-	if not health then return false end
-	local px, py = plate:GetCenter()
-	local hx, hy = health:GetCenter()
-	if not px or not hx then return false end
-	Core.calib = { dx = hx - px, dy = hy - py }
-	return true
-end
+-- Nothing is cached. An earlier version measured the health bar's offset from
+-- the plate's centre once, globally, and reused it for every plate - so a
+-- single bad reading, taken from a plate the client had not finished placing,
+-- put every nameplate on screen hundreds of pixels away from its unit for the
+-- rest of the session. Read both centres live, per plate, every frame.
 
 -- Move the plate's clickable box onto the health bar.
 --
@@ -521,37 +517,35 @@ local function ApplyClickBox(f)
 		return
 	end
 
+	local health = f.regions.health
+	if not health then return end
+
 	local ps = plate:GetEffectiveScale()
 	if not ps or ps == 0 then return end
 	local fs = f:GetEffectiveScale() or ps
 
-	-- where the bar sits relative to the plate's centre, in the plate's units
-	local calib = Core.calib
-	local dx = (calib and calib.dx or 0) + (db.xOffset * fs) / ps
-	local dy = (calib and calib.dy or 0) + (db.yOffset * fs + (f.stackY or 0)) / ps
+	local px, py = plate:GetCenter()
+	local hx, hy = health:GetCenter()
+	if not px or not hx then return end
+
+	-- where our bar sits relative to the plate's centre, in the plate's units
+	local dx = (hx - px) + (db.xOffset * fs) / ps
+	local dy = (hy - py) + (db.yOffset * fs + (f.stackY or 0)) / ps
 
 	local boxW = ((db.clickWidth  > 0) and db.clickWidth  or db.width)  * fs / ps
 	local boxH = ((db.clickHeight > 0) and db.clickHeight or db.height) * fs / ps
 
-	-- Round the size so easing the stack offset does not resize the plate every
-	-- frame; resizing is the one thing here that could disturb its position.
-	local function quantize(v) return math.ceil(v / 8) * 8 end
-	local w = math.min(500, quantize(math.max(f.origPlateW, 2 * math.abs(dx) + boxW)))
-	local h = math.min(500, quantize(math.max(f.origPlateH, 2 * math.abs(dy) + boxH)))
+	-- Grow only, and in steps. Resizing can move the health bar we measured dx
+	-- and dy from, so a size derived from those could chase its own tail;
+	-- monotonic growth converges after a frame or two instead of oscillating.
+	-- Oversizing costs nothing because the insets below trim it back to the bar.
+	local function quantize(v) return math.ceil(v / 16) * 16 end
+	local w = math.min(600, math.max(f.clickW or 0, quantize(math.max(f.origPlateW, 2 * math.abs(dx) + boxW))))
+	local h = math.min(600, math.max(f.clickH or 0, quantize(math.max(f.origPlateH, 2 * math.abs(dy) + boxH))))
 
 	if f.clickW ~= w or f.clickH ~= h then
-		-- Resizing is the one operation here that could disturb the plate's
-		-- position: if the client anchors plates by an edge rather than by the
-		-- centre, changing the height moves the centre we place our art from.
-		-- Measure it and carry the difference so the bar does not jump.
-		local beforeX, beforeY = plate:GetCenter()
 		plate:SetWidth(w)
 		plate:SetHeight(h)
-		local afterX, afterY = plate:GetCenter()
-		if beforeX and afterX then
-			f.sizeShiftX = (f.sizeShiftX or 0) + (afterX - beforeX)
-			f.sizeShiftY = (f.sizeShiftY or 0) + (afterY - beforeY)
-		end
 		f.clickW, f.clickH = w, h
 	end
 
@@ -570,18 +564,21 @@ local function ComputeTarget(f)
 	local db = ns.db
 	local plate = f.plate
 
-	local px, py = plate:GetCenter()
-	if not px then
+	-- Blizzard's health bar is the reference: it is the widget we are replacing,
+	-- so sitting exactly on it is by definition correct, and it needs no
+	-- knowledge of how the plate frame is laid out or anchored.
+	local health = f.regions.health
+	local hx, hy = health and health:GetCenter()
+	if not hx then
 		f.baseX = nil
 		return false
 	end
 
-	local ps = plate:GetEffectiveScale()
+	local ps = health:GetEffectiveScale()
 	local fs = f:GetEffectiveScale()
-	local calib = Core.calib
 
-	f.baseX = (px + (calib and calib.dx or 0) - (f.sizeShiftX or 0)) * ps + db.xOffset * fs
-	f.baseY = (py + (calib and calib.dy or 0) - (f.sizeShiftY or 0)) * ps + db.yOffset * fs
+	f.baseX = hx * ps + db.xOffset * fs
+	f.baseY = hy * ps + db.yOffset * fs
 
 	-- footprint includes the name drawn above the bar, so names stop colliding
 	-- with the bar above them and not just bar against bar
@@ -996,9 +993,6 @@ local function UpdatePlate(f)
 	end
 	HideBlizzardArt(r)
 
-	-- calibrate before touching the plate's size, then size the click box
-	Calibrate(f.plate, r.health)
-
 	-- identity ---------------------------------------------------------------
 	local name = r.name and r.name:GetText() or ""
 	f.unitName = name
@@ -1173,15 +1167,11 @@ local function UpdatePlate(f)
 	-- the hit box follows the bar's size, scale, offset and stacking, so
 	-- recompute it whenever any of those move rather than every frame
 	local stackY = math.floor((f.stackY or 0) + 0.5)
-	-- calibration arrives a tick or two after the plate first shows, and the
-	-- click box is wrong until it does, so treat it as part of the key
-	local calibToken = Core.calib and 1 or 0
 	if f.hitScale ~= scale or f.hitGeneration ~= Core.settingsGeneration
-		or f.hitStackY ~= stackY or f.hitCalib ~= calibToken then
+		or f.hitStackY ~= stackY then
 		f.hitScale = scale
 		f.hitGeneration = Core.settingsGeneration
 		f.hitStackY = stackY
-		f.hitCalib = calibToken
 		ApplyClickBox(f)
 	end
 
@@ -1350,6 +1340,9 @@ function Core.FullUpdate()
 	for _, f in pairs(Core.active) do
 		f.curAlpha, f.curScale = nil, nil
 		f.forceAuraUpdate = true
+		-- click box growth is monotonic, so clear it or it can never shrink
+		-- back after the bar is made smaller
+		f.clickW, f.clickH = nil, nil
 	end
 end
 
@@ -1406,11 +1399,12 @@ function Core.DebugDump()
 		tostring(f.regions.healthBorder ~= nil), tostring(f.regions.threatGlow ~= nil),
 		tostring(f.regions.highlight ~= nil), tostring(f.regions.raidIcon ~= nil)))
 	Util.Print(string.format("  total regions blanked: %d", #(f.regions.allRegions or {})))
-	if Core.calib then
-		Util.Print(string.format("  calibration: dx=%.1f dy=%.1f  (health bar relative to plate centre)",
-			Core.calib.dx, Core.calib.dy))
+	local px, py = target:GetCenter()
+	local hx, hy = f.regions.health and f.regions.health:GetCenter()
+	if px and hx then
+		Util.Print(string.format("  health bar relative to plate centre: dx=%.1f dy=%.1f", hx - px, hy - py))
 	else
-		Util.Print("  calibration: not measured yet")
+		Util.Print("  health bar centre unavailable")
 	end
 	Util.Print(string.format("  plate size now %dx%d, original %s x %s",
 		target:GetWidth(), target:GetHeight(),
@@ -1418,10 +1412,8 @@ function Core.DebugDump()
 		tostring(f.origPlateH and math.floor(f.origPlateH))))
 	Util.Print(string.format("  hit rect insets: %.1f %.1f %.1f %.1f",
 		target:GetHitRectInsets()))
-	Util.Print(string.format("  size shift compensation: x=%.1f y=%.1f",
-		f.sizeShiftX or 0, f.sizeShiftY or 0))
-	Util.Print(string.format("  stack offset: %.1f px   frames walked: %d",
-		f.stackY or 0, #(f.regions.frames or {})))
+	Util.Print(string.format("  stack offset: %.1f px   frames walked: %d   regions blanked: %d",
+		f.stackY or 0, #(f.regions.frames or {}), #(f.regions.allRegions or {})))
 	Util.Print("---- end ----")
 end
 
