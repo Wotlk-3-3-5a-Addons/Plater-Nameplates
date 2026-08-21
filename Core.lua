@@ -191,22 +191,33 @@ local function ClassifyPlate(plate)
 	end
 	ClassifyCast(o, cast)
 
-	-- Every region Blizzard draws, wherever it lives. Which frame owns the
-	-- border / name / level artwork varies between 3.3.5a builds, so we do not
-	-- guess: we collect the lot and blank all of it.
-	local all = {}
+	o.allRegions = {}
+	Core.CollectRegions(plate, o)
+	return o
+end
+
+-- Every region Blizzard draws, wherever it lives. Which frame owns the border /
+-- name / level artwork varies between 3.3.5a builds, and the client can create
+-- regions after we first look, so this re-scans the plate and all of its
+-- children rather than trusting a snapshot taken at hook time.
+function Core.CollectRegions(plate, o)
+	local all = o.allRegions
+	for i = #all, 1, -1 do all[i] = nil end
+
 	local function collect(frame)
 		if not frame then return end
 		for i = 1, select("#", frame:GetRegions()) do
 			all[#all + 1] = select(i, frame:GetRegions())
 		end
 	end
-	collect(plate)
-	collect(health)
-	collect(cast)
-	o.allRegions = all
 
-	return o
+	collect(plate)
+	for i = 1, select("#", plate:GetChildren()) do
+		local child = select(i, plate:GetChildren())
+		o.children = o.children or {}
+		o.children[i] = child
+		collect(child)
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -220,12 +231,26 @@ end
 --------------------------------------------------------------------------------
 
 local function HideBlizzardArt(o)
+	if o.children then
+		for i = 1, #o.children do o.children[i]:SetAlpha(0) end
+	end
 	if o.health then o.health:SetAlpha(0) end
 	if o.cast then o.cast:SetAlpha(0) end
 	local all = o.allRegions
 	if all then
 		for i = 1, #all do all[i]:SetAlpha(0) end
 	end
+end
+
+-- Cheap per-tick check. The client re-shows and re-alphas its own artwork when
+-- state changes - the threat glow flashing on as you take aggro is the obvious
+-- one - so watching two representative widgets catches that within one frame
+-- instead of leaving a stray red border on screen until the next full sweep.
+local function ArtDrifted(o)
+	if o.health and o.health:GetAlpha() ~= 0 then return true end
+	if o.threatGlow and o.threatGlow:GetAlpha() ~= 0 then return true end
+	if o.healthBorder and o.healthBorder:GetAlpha() ~= 0 then return true end
+	return false
 end
 
 --------------------------------------------------------------------------------
@@ -347,6 +372,8 @@ local function CreateUnitFrame(plate)
 
 	f.auraList = {}
 	f.plate = plate
+	-- provisional anchor; PositionFrame replaces this CENTER point every tick
+	f:SetPoint("CENTER", plate, "CENTER", 0, 0)
 	return f
 end
 
@@ -436,11 +463,85 @@ local function ApplySettings(f)
 		Util.SetFont(icon.stacks, db.font, a.stackSize, db.fontOutline)
 	end
 
-	-- Anchor to Blizzard's health bar, not to the plate frame. A 3.3.5a plate
-	-- frame is far taller than its health bar because it reserves room for the
-	-- name and the cast bar, so plate CENTER sits well above the bar.
+end
+
+--------------------------------------------------------------------------------
+-- positioning
+--
+-- Our frame is a WorldFrame child rather than a child of the plate, so it has
+-- to be placed by hand. We place it off the plate frame, which is the thing the
+-- client actually moves to follow the unit, plus a one-off calibration that
+-- records where Blizzard's health bar sits inside that frame. A 3.3.5a plate is
+-- much taller than its health bar because it reserves room for the name and the
+-- cast bar, so plate CENTER on its own lands well above the bar.
+--
+-- Calibrating against the plate rather than anchoring to the health bar matters
+-- once we start resizing the plate for the click area: the health bar may move
+-- when its parent is resized, the plate's own centre does not.
+--------------------------------------------------------------------------------
+
+local function Calibrate(plate, health)
+	if Core.calib then return true end
+	if not health then return false end
+	local px, py = plate:GetCenter()
+	local hx, hy = health:GetCenter()
+	if not px or not hx then return false end
+	Core.calib = { dx = hx - px, dy = hy - py }
+	return true
+end
+
+-- Size the plate frame so its clickable box matches the health bar we draw.
+-- This is also what stops plates overlapping: the client spaces plates using
+-- these dimensions, and by default they are narrower than our artwork.
+local function ApplyClickArea(f)
+	local db = ns.db
+	local plate = f.plate
+
+	f.origPlateW = f.origPlateW or plate:GetWidth()
+	f.origPlateH = f.origPlateH or plate:GetHeight()
+
+	if not db.resizeClickArea then
+		plate:SetWidth(f.origPlateW)
+		plate:SetHeight(f.origPlateH)
+		return
+	end
+
+	plate:SetWidth((db.clickWidth > 0) and db.clickWidth or db.width)
+	if db.clickHeight > 0 then plate:SetHeight(db.clickHeight) end
+end
+
+local function PositionFrame(f, dt)
+	local db = ns.db
+	local plate = f.plate
+
+	local px, py = plate:GetCenter()
+	if not px then return end
+
+	local calib = Core.calib
+	local tx, ty = px, py
+	if calib then tx, ty = px + calib.dx, py + calib.dy end
+
+	-- work in screen pixels so easing is independent of either frame's scale
+	local ps = plate:GetEffectiveScale()
+	local targetX, targetY = tx * ps, ty * ps
+
+	local tau = db.smoothing * 0.30
+	if not f.smoothX or tau <= 0
+		or math.abs(targetX - f.smoothX) > 200
+		or math.abs(targetY - f.smoothY) > 200 then
+		-- no history, easing off, or the plate was recycled onto a different
+		-- unit somewhere else on screen: snap rather than slide across
+		f.smoothX, f.smoothY = targetX, targetY
+	else
+		local k = 1 - math.exp(-dt / tau)
+		f.smoothX = f.smoothX + (targetX - f.smoothX) * k
+		f.smoothY = f.smoothY + (targetY - f.smoothY) * k
+	end
+
+	local fs = f:GetEffectiveScale()
 	f:ClearAllPoints()
-	f:SetPoint("CENTER", f.regions.health or f.plate, "CENTER", db.xOffset, db.yOffset)
+	f:SetPoint("CENTER", WorldFrame, "BOTTOMLEFT",
+		f.smoothX / fs + db.xOffset, f.smoothY / fs + db.yOffset)
 end
 
 --------------------------------------------------------------------------------
@@ -575,7 +676,7 @@ local function UpdateAuras(f)
 
 		if db.showTimer and aura.expires then
 			local remain = aura.expires - now
-			icon.timer:SetText(Util.FormatTime(remain))
+			icon.timer:SetText(Util.FormatTime(remain, db.timerDecimals))
 			if remain <= 3 then
 				icon.timer:SetTextColor(1, 0.3, 0.3)
 			else
@@ -726,13 +827,23 @@ local function UpdatePlate(f)
 
 	if f.settingsGeneration ~= Core.settingsGeneration then ApplySettings(f) end
 
-	-- Plates are recycled between units and the client can restore its own
-	-- artwork when that happens, so re-blank it periodically instead of
-	-- trusting the single pass we do at show time.
-	f.hideElapsed = (f.hideElapsed or 0) + (Core.tickInterval or 0.03)
+	local dt = Core.tickInterval or 0.03
+
+	-- Blizzard restores its own artwork as unit state changes and when a plate
+	-- is recycled onto a new unit. Catch that the moment it happens, and re-scan
+	-- for regions that did not exist when we first hooked the plate twice a second.
+	if ArtDrifted(r) then HideBlizzardArt(r) end
+	f.hideElapsed = (f.hideElapsed or 0) + dt
 	if f.hideElapsed >= 0.5 then
 		f.hideElapsed = 0
+		Core.CollectRegions(f.plate, r)
 		HideBlizzardArt(r)
+	end
+
+	-- calibrate before touching the plate's size, then size the click box
+	if Calibrate(f.plate, r.health) and f.clickGeneration ~= Core.settingsGeneration then
+		f.clickGeneration = Core.settingsGeneration
+		ApplyClickArea(f)
 	end
 
 	-- identity ---------------------------------------------------------------
@@ -875,8 +986,8 @@ local function UpdatePlate(f)
 	-- cast + auras ---------------------------------------------------------------
 	UpdateCastBar(f)
 
-	f.auraElapsed = (f.auraElapsed or 0) + (Core.tickInterval or 0.03)
-	if f.auraElapsed >= 0.1 or f.forceAuraUpdate then
+	f.auraElapsed = (f.auraElapsed or 0) + dt
+	if f.auraElapsed >= (db.auras.timerRate or 0.05) or f.forceAuraUpdate then
 		f.auraElapsed = 0
 		f.forceAuraUpdate = nil
 		UpdateAuras(f)
@@ -897,13 +1008,16 @@ local function UpdatePlate(f)
 	f.scriptScale, f.scriptAlpha = nil, nil
 	Scripting.RunHook("OnUpdate", f)
 
-	-- final scale / alpha ----------------------------------------------------------
+	-- final scale / position / alpha -------------------------------------------------
+	-- scale first: PositionFrame divides by the frame's effective scale
 	local scale = db.scale * cfg.scale * (isTarget and db.targetScale or 1)
 	if f.scriptScale then scale = f.scriptScale end
 	if math.abs((f.curScale or 0) - scale) > 0.001 then
 		f:SetScale(scale)
 		f.curScale = scale
 	end
+
+	PositionFrame(f, dt)
 
 	local alpha
 	if not hasTarget then
@@ -936,6 +1050,9 @@ local function OnPlateShow(plate)
 	f.prevCastValue = nil
 	f.forceAuraUpdate = true
 	f.curAlpha, f.curScale = nil, nil
+	-- a recycled plate belongs to a different unit somewhere else on screen;
+	-- drop the easing history so it snaps into place instead of gliding there
+	f.smoothX, f.smoothY = nil, nil
 	f.scriptColor, f.scriptBorderColor, f.scriptName = nil, nil, nil
 
 	if f.constructorGeneration ~= constructorGeneration then
@@ -958,11 +1075,14 @@ local function OnPlateHide(plate)
 end
 
 local function InitializePlate(plate)
-	if Core.allPlates[plate] then return end
-	Core.allPlates[plate] = true
+	if Core.allPlates[plate] then return true end
 
 	local regions = ClassifyPlate(plate)
-	if not regions.health then return end
+	-- do not mark the plate as handled if we could not read it: leaving it
+	-- unmarked means the next scan tries again rather than abandoning a plate
+	-- that would then keep drawing Blizzard's artwork forever
+	if not regions.health then return false end
+	Core.allPlates[plate] = true
 
 	local f = CreateUnitFrame(plate)
 	f.regions = regions
@@ -975,6 +1095,7 @@ local function InitializePlate(plate)
 	plate:HookScript("OnHide", OnPlateHide)
 
 	if plate:IsShown() then OnPlateShow(plate) end
+	return true
 end
 
 --------------------------------------------------------------------------------
@@ -991,9 +1112,10 @@ local function ScanWorldFrame()
 	for i = 1, count do
 		local child = select(i, WorldFrame:GetChildren())
 		if child and not child.plwChecked then
-			child.plwChecked = true
 			if IsNamePlate(child) then
-				InitializePlate(child)
+				if InitializePlate(child) then child.plwChecked = true end
+			else
+				child.plwChecked = true
 			end
 		end
 	end
@@ -1096,6 +1218,16 @@ function Core.DebugDump()
 		tostring(f.regions.healthBorder ~= nil), tostring(f.regions.threatGlow ~= nil),
 		tostring(f.regions.highlight ~= nil), tostring(f.regions.raidIcon ~= nil)))
 	Util.Print(string.format("  total regions blanked: %d", #(f.regions.allRegions or {})))
+	if Core.calib then
+		Util.Print(string.format("  calibration: dx=%.1f dy=%.1f  (health bar relative to plate centre)",
+			Core.calib.dx, Core.calib.dy))
+	else
+		Util.Print("  calibration: not measured yet")
+	end
+	Util.Print(string.format("  plate size now %dx%d, original %s x %s",
+		target:GetWidth(), target:GetHeight(),
+		tostring(f.origPlateW and math.floor(f.origPlateW)),
+		tostring(f.origPlateH and math.floor(f.origPlateH))))
 	Util.Print("---- end ----")
 end
 

@@ -94,16 +94,20 @@ function Util.ShortNumber(value)
 	return tostring(math.floor(value))
 end
 
-function Util.FormatTime(seconds)
+-- `decimals` is how many fractional digits to show while the timer is under a
+-- minute: 0 for whole seconds, 1 for tenths, 2 for hundredths.
+function Util.FormatTime(seconds, decimals)
 	if not seconds or seconds <= 0 then return "" end
 	if seconds >= 3600 then
 		return string.format("%dh", math.floor(seconds / 3600 + 0.5))
 	elseif seconds >= 60 then
 		return string.format("%dm", math.floor(seconds / 60 + 0.5))
-	elseif seconds >= 10 then
+	end
+	decimals = decimals or 0
+	if decimals <= 0 then
 		return string.format("%d", math.floor(seconds))
 	end
-	return string.format("%.1f", seconds)
+	return string.format("%." .. decimals .. "f", seconds)
 end
 
 function Util.ColorToHex(r, g, b)

@@ -373,6 +373,22 @@ local function BuildGeneral(panel)
 		function() return db().updateInterval end, function(v) db().updateInterval = v end))
 
 	L:Gap()
+	L:Add(Widgets.Header(c, "Movement"))
+	L:Add(Widgets.Text(c, "Higher smoothing makes nameplates drift towards the unit instead of darting around when mobs move quickly. 0 follows the client exactly."))
+	L:Add(Widgets.Slider(c, "Movement smoothing", 0, 1.0, 0.05,
+		function() return db().smoothing end, function(v) db().smoothing = v end))
+
+	L:Gap()
+	L:Add(Widgets.Header(c, "Clickable area"))
+	L:Add(Widgets.Text(c, "The frame you click to target is Blizzard's plate, not our artwork. Matching its size to the health bar makes the bar clickable, and gives the client's plate spacing the right dimensions so plates stop overlapping."))
+	L:Add(Widgets.CheckBox(c, "Resize the clickable area to fit the health bar", nil,
+		function() return db().resizeClickArea end, function(v) db().resizeClickArea = v end))
+	L:Add(Widgets.Slider(c, "Click width (0 = match bar)", 0, 250, 1,
+		function() return db().clickWidth end, function(v) db().clickWidth = v end))
+	L:Add(Widgets.Slider(c, "Click height (0 = leave alone)", 0, 80, 1,
+		function() return db().clickHeight end, function(v) db().clickHeight = v end))
+
+	L:Gap()
 	L:Add(Widgets.Header(c, "Media"))
 	L:Add(Widgets.Dropdown(c, "Bar texture", function()
 		local t = {}
@@ -587,6 +603,10 @@ local function BuildAuras(panel)
 	end, function() return a().growth end, function(v) a().growth = v end))
 	L:Add(Widgets.CheckBox(c, "Show timers", nil,
 		function() return a().showTimer end, function(v) a().showTimer = v end))
+	L:Add(Widgets.Slider(c, "Timer decimals", 0, 2, 1,
+		function() return a().timerDecimals end, function(v) a().timerDecimals = v end))
+	L:Add(Widgets.Slider(c, "Timer refresh rate (seconds)", 0.02, 0.5, 0.01,
+		function() return a().timerRate end, function(v) a().timerRate = v end))
 	L:Add(Widgets.CheckBox(c, "Show stacks", nil,
 		function() return a().showStacks end, function(v) a().showStacks = v end))
 	L:Add(Widgets.CheckBox(c, "Color icon border by school", nil,

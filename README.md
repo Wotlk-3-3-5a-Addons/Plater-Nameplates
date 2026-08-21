@@ -50,6 +50,9 @@ that artwork, and draw over the top — and rebuilds Plater's *features* on that
 - Per-unit-type settings for enemy players, enemy NPCs, neutral NPCs, friendly players
   and friendly NPCs — each with its own color mode, alpha, scale, and which elements show
 - Target highlight, target scale, target arrows, non-target fading
+- **Movement smoothing** so plates drift towards fast-moving units instead of darting
+- **Clickable health bars** and non-overlapping plates, by sizing the plate's hit box
+  to the artwork
 - Raid target icons, elite `+` marker, boss `??` level, execute-range coloring
 - **Mods and scripts** with `Constructor` / `OnShow` / `OnUpdate` / `OnHide` /
   `OnEvent` / `Initialization` hooks, and mod options stored in `modTable.config`
@@ -99,9 +102,12 @@ Script API (`Plater.` or `PlaterW.`): `SetNameplateColor`, `ResetNameplateColor`
    flag, or once you target / mouse over it. Until then an enemy player is treated as an
    enemy NPC. Class colors need the same — a class is learned from a real unit token or
    from an unambiguous class-defining spell cast.
-4. **The click area is still Blizzard's.** The plate frame you click is unchanged; only
-   its art is hidden. If you make the health bar much wider or narrower than the default,
-   the clickable box will not match what you see.
+4. **Clicking targets Blizzard's plate frame, not our artwork.** There is no way to
+   target from a custom frame without a unit token. Instead the addon resizes the plate
+   frame to match the health bar, so the bar you see is the box you click — and because
+   the client spaces plates apart using those same dimensions, that is also what stops
+   plates overlapping each other. Turn it off, or tune the box independently of the bar,
+   under General → Clickable area.
 5. **No wago.io / WeakAuras-Companion.** Companion talks to retail Plater's import format
    and to a running WeakAuras install; neither applies here. Import/export uses this
    addon's own plain-Lua format.

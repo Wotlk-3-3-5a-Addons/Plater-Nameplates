@@ -40,6 +40,19 @@ ns.defaults = {
 	yOffset      = 0,
 	xOffset      = 0,
 
+	-- movement --------------------------------------------------------------
+	-- 0 eases nothing and the plate snaps to the unit every frame; higher
+	-- values make plates drift towards the unit instead of darting around.
+	smoothing    = 0.35,
+
+	-- clickable area ----------------------------------------------------------
+	-- The frame you click to target is Blizzard's plate, not our artwork. Sizing
+	-- that frame to match the health bar makes the bar clickable, and gives the
+	-- client's own plate stacking the right dimensions so plates stop overlapping.
+	resizeClickArea = true,
+	clickWidth      = 0,   -- 0 = match the health bar width
+	clickHeight     = 0,   -- 0 = leave Blizzard's height alone
+
 	borderSize   = 1,
 	borderColor  = { 0, 0, 0, 1 },
 	bgColor      = { 0.08, 0.08, 0.08, 0.85 },
@@ -102,6 +115,8 @@ ns.defaults = {
 		showStacks  = true,
 		showTimer   = true,
 		timerSize   = 9,
+		timerDecimals = 1,        -- fractional digits shown under a minute
+		timerRate     = 0.05,     -- how often aura timers redraw, seconds
 		stackSize   = 10,
 		borderByType= true,           -- color icon border by debuff school
 		blacklist   = {},             -- [spellName] = true
