@@ -1197,6 +1197,8 @@ SlashCmdList["PLATERWRATH"] = function(msg)
 		Util.Print("friendly nameplates " .. (ns.db.showFriendlyPlates and "on." or "off."))
 	elseif msg == "debug" then
 		ns.Core.DebugDump()
+	elseif msg == "errors" then
+		Util.DumpErrors()
 	elseif msg == "wipeauras" then
 		ns.Auras.WipeAll()
 		Util.Print("aura cache cleared.")
@@ -1206,7 +1208,7 @@ SlashCmdList["PLATERWRATH"] = function(msg)
 		Util.Print(("%d plates hooked, %d mods, profile %s"):format(
 			n, Util.CountTable(ns.db.mods), ns.Config.GetActiveProfile()))
 	else
-		Util.Print("commands: |cffffd100/plater|r config, toggle, enemy, friendly, reset, minimap, wipeauras, status, debug")
+		Util.Print("commands: |cffffd100/plater|r config, toggle, enemy, friendly, reset, minimap, wipeauras, status, debug, errors")
 	end
 end
 

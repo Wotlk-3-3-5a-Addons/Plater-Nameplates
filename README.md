@@ -109,6 +109,11 @@ Script API (`Plater.` or `PlaterW.`): `SetNameplateColor`, `ResetNameplateColor`
    plates overlapping each other. The hit box is also shifted onto the bar with hit rect
    insets, so the bar stays clickable however far you offset it from the unit. Turn it
    off, or tune the box independently of the bar, under General → Clickable area.
+
+   Nameplates are protected frames, so the client only lets an addon change that
+   geometry **out of combat**. The box is set the moment combat drops and then left
+   alone, which means a bar you offset a long way mid-fight may not become clickable
+   until the fight ends.
 5. **No wago.io / WeakAuras-Companion.** Companion talks to retail Plater's import format
    and to a running WeakAuras install; neither applies here. Import/export uses this
    addon's own plain-Lua format.

@@ -214,12 +214,39 @@ function Util.Print(...)
 	DEFAULT_CHAT_FRAME:AddMessage(PREFIX .. msg)
 end
 
+-- Errors are deduplicated: most of what this addon runs is on a per-frame
+-- loop, so an unlucky one would otherwise print thousands of identical lines.
+-- The full list stays available through /plater errors.
 local errorsShown = {}
+Util.errorLog = {}
+
 function Util.Error(err)
 	err = tostring(err)
-	if errorsShown[err] then return end
-	errorsShown[err] = true
+
+	local entry = errorsShown[err]
+	if entry then
+		entry.count = entry.count + 1
+		return
+	end
+
+	entry = { text = err, count = 1 }
+	errorsShown[err] = entry
+	Util.errorLog[#Util.errorLog + 1] = entry
+	if #Util.errorLog > 30 then table.remove(Util.errorLog, 1) end
+
 	DEFAULT_CHAT_FRAME:AddMessage(PREFIX .. "|cffff5555error|r " .. err)
+end
+
+function Util.DumpErrors()
+	if #Util.errorLog == 0 then
+		Util.Print("no errors recorded this session.")
+		return
+	end
+	Util.Print("|cffff5555" .. #Util.errorLog .. " distinct error(s) this session:|r")
+	for i = 1, #Util.errorLog do
+		local e = Util.errorLog[i]
+		DEFAULT_CHAT_FRAME:AddMessage(string.format("  |cffffd100[x%d]|r %s", e.count, e.text))
+	end
 end
 
 --------------------------------------------------------------------------------

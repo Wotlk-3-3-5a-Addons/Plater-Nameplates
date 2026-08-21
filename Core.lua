@@ -192,6 +192,7 @@ local function ClassifyPlate(plate)
 	ClassifyCast(o, cast)
 
 	o.allRegions = {}
+	Core.BuildProtected(o)
 	Core.CollectRegions(plate, o)
 	return o
 end
@@ -202,6 +203,29 @@ end
 -- trusting a snapshot taken at hook time. It recurses: a border drawn by a
 -- grandchild is exactly the sort of thing that survives a one-level sweep and
 -- leaves an empty outline floating on screen.
+-- Widgets whose state we still read after hiding them, so they must keep their
+-- texture and their contents. Everything else can simply lose its texture.
+function Core.BuildProtected(o)
+	local p = {}
+	local function add(r) if r then p[r] = true end end
+
+	add(o.threatGlow)   -- vertex colour tells us the threat situation
+	add(o.raidIcon)     -- tex coords tell us which marker
+	add(o.highlight)    -- shown state tells us about mouseover
+	add(o.eliteIcon)
+	add(o.bossIcon)
+	add(o.name)
+	add(o.level)
+	add(o.spellIcon)    -- we copy the cast icon straight off it
+	add(o.spellText)
+	add(o.castNoStop)
+	-- the status bar fills carry the colours we read reaction and health from
+	if o.health then add(o.health:GetStatusBarTexture()) end
+	if o.cast   then add(o.cast:GetStatusBarTexture())   end
+
+	o.protected = p
+end
+
 function Core.CollectRegions(plate, o)
 	local all = o.allRegions
 	for i = #all, 1, -1 do all[i] = nil end
@@ -225,6 +249,23 @@ function Core.CollectRegions(plate, o)
 	end
 
 	walk(plate, 0)
+
+	-- Precompute which textures can be blanked outright. Alpha alone loses to
+	-- anything the client animates: UI-TargetingFrame-Flash rewrites its own
+	-- alpha every frame, so a nameplate-shaped glow stayed on screen no matter
+	-- how often we zeroed it. Clearing the texture is not something the client
+	-- puts back.
+	local nilable = o.nilable
+	if not nilable then nilable = {}; o.nilable = nilable end
+	for i = #nilable, 1, -1 do nilable[i] = nil end
+
+	local protected = o.protected
+	for i = 1, #all do
+		local r = all[i]
+		if r:GetObjectType() == "Texture" and not (protected and protected[r]) then
+			nilable[#nilable + 1] = r
+		end
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -252,6 +293,15 @@ local function HideBlizzardArt(o)
 	local all = o.allRegions
 	if all then
 		for i = 1, #all do all[i]:SetAlpha(0) end
+	end
+
+	-- alpha is not enough for anything the client animates; clear the texture
+	local nilable = o.nilable
+	if nilable then
+		for i = 1, #nilable do
+			local r = nilable[i]
+			if r:GetTexture() then r:SetTexture(nil) end
+		end
 	end
 end
 
@@ -506,6 +556,17 @@ end
 local function ApplyClickBox(f)
 	local db, plate = ns.db, f.plate
 
+	-- Nameplates are protected frames: they are what you click to target, so
+	-- the client will not let insecure code touch their geometry while you are
+	-- in combat. Attempting it anyway is what raises "Interface action failed
+	-- because of an AddOn", and the resize silently does not take. Set the box
+	-- out of combat, where it is allowed, and leave it alone until combat ends.
+	if InCombatLockdown() then
+		f.clickPending = true
+		return
+	end
+	f.clickPending = nil
+
 	f.origPlateW = f.origPlateW or plate:GetWidth()
 	f.origPlateH = f.origPlateH or plate:GetHeight()
 
@@ -549,8 +610,13 @@ local function ApplyClickBox(f)
 		f.clickW, f.clickH = w, h
 	end
 
-	-- now every inset is positive: we are only ever trimming inwards
-	local pw, ph = w / 2, h / 2
+	-- Derive the insets from the size the frame actually has, not the size we
+	-- asked for. The client rewrites plate geometry, so a resize may simply not
+	-- take, and computing a hit box against a rect the frame does not have puts
+	-- the clickable area somewhere else entirely. Its natural size is roomy, so
+	-- in practice there is plenty to trim.
+	local pw = plate:GetWidth() / 2
+	local ph = plate:GetHeight() / 2
 	plate:SetHitRectInsets(
 		dx - boxW / 2 + pw,      -- left
 		pw - dx - boxW / 2,      -- right
@@ -1167,7 +1233,8 @@ local function UpdatePlate(f)
 	-- the hit box follows the bar's size, scale, offset and stacking, so
 	-- recompute it whenever any of those move rather than every frame
 	local stackY = math.floor((f.stackY or 0) + 0.5)
-	if f.hitScale ~= scale or f.hitGeneration ~= Core.settingsGeneration
+	if f.clickPending or f.hitScale ~= scale
+		or f.hitGeneration ~= Core.settingsGeneration
 		or f.hitStackY ~= stackY then
 		f.hitScale = scale
 		f.hitGeneration = Core.settingsGeneration
@@ -1315,20 +1382,25 @@ runner:SetScript("OnUpdate", function(self, elapsed)
 	local doTimers = sinceTimers >= (ns.db.auras.timerRate or 0.03)
 	if doTimers then sinceTimers = 0 end
 
-	-- three phases: work out where each plate wants to be, resolve collisions
-	-- between them, then ease each one towards its resolved spot
-	for _, f in pairs(Core.active) do
-		if f:IsShown() then ComputeTarget(f) end
-	end
-
-	StackPlates()
-
-	for _, f in pairs(Core.active) do
-		if f:IsShown() then
-			ApplyPosition(f, elapsed)
-			if doTimers then RefreshAuraTimers(f) end
+	-- Three phases: work out where each plate wants to be, resolve collisions
+	-- between them, then ease each one towards its resolved spot.
+	-- Guarded, because this runs on every rendered frame: an unprotected error
+	-- in here does not fail once, it fails sixty times a second.
+	local ok, err = pcall(function()
+		for _, f in pairs(Core.active) do
+			if f:IsShown() then ComputeTarget(f) end
 		end
-	end
+
+		StackPlates()
+
+		for _, f in pairs(Core.active) do
+			if f:IsShown() then
+				ApplyPosition(f, elapsed)
+				if doTimers then RefreshAuraTimers(f) end
+			end
+		end
+	end)
+	if not ok then Util.Error(err) end
 end)
 
 --------------------------------------------------------------------------------
@@ -1412,8 +1484,10 @@ function Core.DebugDump()
 		tostring(f.origPlateH and math.floor(f.origPlateH))))
 	Util.Print(string.format("  hit rect insets: %.1f %.1f %.1f %.1f",
 		target:GetHitRectInsets()))
-	Util.Print(string.format("  stack offset: %.1f px   frames walked: %d   regions blanked: %d",
-		f.stackY or 0, #(f.regions.frames or {}), #(f.regions.allRegions or {})))
+	Util.Print(string.format("  stack offset: %.1f px   frames walked: %d   textures cleared: %d",
+		f.stackY or 0, #(f.regions.frames or {}), #(f.regions.nilable or {})))
+	Util.Print(string.format("  in combat: %s   click box pending: %s",
+		tostring(InCombatLockdown() and true or false), tostring(f.clickPending and true or false)))
 	Util.Print("---- end ----")
 end
 
