@@ -241,6 +241,14 @@ function Auras.RebuildFilterIndex()
 	end
 end
 
+-- Answers the question the filter itself asks, so anything reporting on the
+-- blacklist agrees with what the filter actually does. Reading the saved table
+-- directly instead would report a name as un-blacklisted purely because the
+-- capitals differ, which is the confusion this index exists to remove.
+function Auras.IsBlacklisted(name)
+	return name and blackIndex[strtrim(name):lower()] and true or false
+end
+
 -- Is anything currently tracked called this? Used to tell a player who has
 -- filtered a name that matches nothing, instead of silently accepting it.
 function Auras.FindTrackedName(name)

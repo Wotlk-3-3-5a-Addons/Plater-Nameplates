@@ -1221,7 +1221,37 @@ SlashCmdList["PLATERWRATH"] = function(input)
 	end
 
 	if cmd == "blacklist" then
+		if rest == "" then
+			-- No argument used to be a usage error. Printing the list instead
+			-- answers the question someone in this situation is actually
+			-- asking: is the thing I added even in here?
+			local names = Util.SortedKeys(ns.db.auras.blacklist)
+			if #names == 0 then
+				Util.Print("the blacklist is empty.")
+			else
+				Util.Print(("blacklist (%d):"):format(#names))
+				for _, name in ipairs(names) do Util.Print("   " .. name) end
+			end
+			return
+		end
 		EditList(ns.db.auras.blacklist, "blacklist", true)
+		return
+
+	elseif cmd == "hide" then
+		-- Blacklist by position in the last listing. No name to type, no
+		-- capitals to match, and no icon to identify by eye.
+		local index = tonumber(rest)
+		local listing = ns.lastAuraListing
+		if not index or not listing or not listing[index] then
+			Util.Print("run |cffffd100/plater auras|r first, then |cffffd100/plater hide 3|r "
+				.. "to blacklist the third entry it printed.")
+			return
+		end
+		local name = listing[index]
+		ns.db.auras.blacklist[name] = true
+		ns.Core.FullUpdate()
+		Util.Print(("|cffffd100%s|r blacklisted. |cffffd100/plater unblacklist %s|r puts it back.")
+			:format(name, name))
 		return
 	elseif cmd == "unblacklist" then
 		EditList(ns.db.auras.blacklist, "blacklist", false)
@@ -1248,6 +1278,10 @@ SlashCmdList["PLATERWRATH"] = function(input)
 		end
 		Util.Print("tracked on |cffffd100" .. (UnitName("target") or "?") .. "|r "
 			.. "|cff888888(hover a link to see the spell and its icon)|r:")
+
+		local listing = {}
+		ns.lastAuraListing = listing
+
 		for _, aura in pairs(bucket) do
 			-- A spell link is hoverable, so the icon in chat can be checked
 			-- against the icon on the nameplate. Several spells share artwork -
@@ -1259,14 +1293,19 @@ SlashCmdList["PLATERWRATH"] = function(input)
 				if ok and link then label = link end
 			end
 
-			Util.Print(("   %s  %s  %s%s"):format(
+			listing[#listing + 1] = aura.name
+
+			Util.Print(("  |cffffd100%d.|r %s  %s  %s%s"):format(
+				#listing,
 				label,
 				aura.type == "BUFF" and "buff" or "debuff",
 				aura.mine and "|cff66ff66yours|r" or "|cff888888someone else's|r",
-				ns.db.auras.blacklist[aura.name] and "  |cffff5555blacklisted|r" or ""))
+				-- asked the same way the filter asks it, so this cannot claim
+				-- something is not blacklisted while the filter thinks it is
+				ns.Auras.IsBlacklisted(aura.name) and "  |cffff5555blacklisted|r" or ""))
 		end
-		Util.Print("hide one with |cffffd100/plater blacklist <name>|r, "
-			.. "or right click its icon on the nameplate.")
+		Util.Print("hide one with |cffffd100/plater hide <number>|r - no name to type. "
+			.. "|cffffd100/plater blacklist|r on its own shows what is already hidden.")
 		return
 	end
 
