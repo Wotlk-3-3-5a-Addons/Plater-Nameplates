@@ -94,20 +94,29 @@ function Util.ShortNumber(value)
 	return tostring(math.floor(value))
 end
 
--- `decimals` is how many fractional digits to show while the timer is under a
--- minute: 0 for whole seconds, 1 for tenths, 2 for hundredths.
-function Util.FormatTime(seconds, decimals)
+-- Whole seconds for most of a timer's life, switching to fractions only for the
+-- last stretch of it, which is the part worth reading precisely. `threshold` is
+-- where that switch happens and `decimals` how many digits appear after it.
+--
+-- Precision everywhere is worse than it sounds: a number changing in its third
+-- decimal every frame reads as noise, and the digits that matter - is this
+-- about to fall off - get lost in it.
+function Util.FormatTime(seconds, decimals, threshold)
 	if not seconds or seconds <= 0 then return "" end
+
 	if seconds >= 3600 then
 		return string.format("%dh", math.floor(seconds / 3600 + 0.5))
 	elseif seconds >= 60 then
 		return string.format("%dm", math.floor(seconds / 60 + 0.5))
 	end
+
 	decimals = decimals or 0
-	if decimals <= 0 then
-		return string.format("%d", math.floor(seconds))
+	threshold = threshold or 0
+
+	if decimals > 0 and seconds < threshold then
+		return string.format("%." .. decimals .. "f", seconds)
 	end
-	return string.format("%." .. decimals .. "f", seconds)
+	return string.format("%d", math.floor(seconds + 0.5))
 end
 
 function Util.ColorToHex(r, g, b)

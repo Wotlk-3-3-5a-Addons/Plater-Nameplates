@@ -128,8 +128,9 @@ ns.defaults = {
 		showStacks  = true,
 		showTimer   = true,
 		timerSize   = 9,
-		timerDecimals = 3,        -- fractional digits shown under a minute
-		timerRate     = 0.03,     -- how often aura timers redraw, seconds
+		timerDecimals  = 1,       -- fractional digits, used only below the threshold
+		timerThreshold = 2,       -- seconds; above this the timer is whole numbers
+		timerRate      = 0.03,    -- how often aura timers redraw, seconds
 		stackSize   = 10,
 		borderByType= true,           -- color icon border by debuff school
 		blacklist   = {},             -- [spellName] = true
@@ -211,7 +212,7 @@ end
 -- Runs after defaults are filled in. `dbVersion` is deliberately absent from
 -- ns.defaults: if it had a default, ApplyDefaults would stamp the current
 -- version onto old profiles and every migration would be skipped.
-local DB_VERSION = 2
+local DB_VERSION = 3
 
 function Config.Migrate(profile)
 	local version = profile.dbVersion or 1
@@ -221,6 +222,13 @@ function Config.Migrate(profile)
 		-- saved with whole-second formatting and a slow redraw
 		profile.auras.timerDecimals = 3
 		profile.auras.timerRate = 0.03
+	end
+
+	if version < 3 then
+		-- Fractions everywhere turned out to be unreadable. Whole seconds for
+		-- most of a timer, fractions only for the last couple of seconds.
+		profile.auras.timerDecimals = 1
+		profile.auras.timerThreshold = 2
 	end
 
 	profile.dbVersion = DB_VERSION

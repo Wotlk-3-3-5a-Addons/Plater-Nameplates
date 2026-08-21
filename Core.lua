@@ -967,7 +967,7 @@ local function UpdateAuras(f)
 
 		if db.showTimer and aura.expires then
 			local remain = aura.expires - now
-			icon.timer:SetText(Util.FormatTime(remain, db.timerDecimals))
+			icon.timer:SetText(Util.FormatTime(remain, db.timerDecimals, db.timerThreshold))
 			if remain <= 3 then
 				icon.timer:SetTextColor(1, 0.3, 0.3)
 			else
@@ -1033,7 +1033,7 @@ local function RefreshAuraTimers(f)
 		if icon and aura and icon:IsShown() then
 			if aura.expires then
 				local remain = aura.expires - now
-				icon.timer:SetText(Util.FormatTime(remain, db.timerDecimals))
+				icon.timer:SetText(Util.FormatTime(remain, db.timerDecimals, db.timerThreshold))
 				if remain <= 3 then
 					icon.timer:SetTextColor(1, 0.3, 0.3)
 				else
