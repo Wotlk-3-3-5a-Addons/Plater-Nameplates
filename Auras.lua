@@ -136,10 +136,14 @@ clFrame:SetScript("OnEvent", function(self, event, timestamp, subEvent,
 	spellId, spellName, spellSchool, auraType, amount)
 
 	if event == "PLAYER_REGEN_ENABLED" then
-		-- leaving combat: drop everything that is no longer relevant
-		local now = GetTime()
-		for guid, t in pairs(touched) do
-			if now - t > 5 then Auras.Wipe(guid) end
+		-- Leaving combat used to wipe any unit not touched in the last five
+		-- seconds. `touched` is only refreshed when an aura is applied, and a
+		-- damage-over-time effect ticking away does not apply anything, so a
+		-- live 18 second dot on a mob you had stopped hitting was thrown away
+		-- mid-duration. Expiry and the idle sweep below already bound the
+		-- store; drop only what has nothing left in it.
+		for guid, bucket in pairs(store) do
+			if not next(bucket) then Auras.Wipe(guid) end
 		end
 		return
 	end
@@ -203,39 +207,89 @@ end)
 -- exact data from a real unit token
 --------------------------------------------------------------------------------
 
-local exactBuffer = {}
-local logBuffer   = {}
+local logBuffer = {}
+local FILTERS = { "HARMFUL", "HELPFUL" }
 
-local function ReadUnitAuras(unit, out)
-	local playerGUID = UnitGUID("player")
-	local n = 0
+-- Write what the API actually reports for a unit straight into that unit's
+-- bucket, replacing whatever the combat log had inferred.
+--
+-- The combat log never states a duration, so applying an aura stores a guess
+-- from a table of common spells. Any spell whose real duration is longer than
+-- the guess - a talented damage-over-time effect, most obviously - expired early
+-- and its icon vanished. While the mob was your target that was invisible,
+-- because the exact API was read instead; the moment you looked away the guess
+-- took over and the icon disappeared. Overwriting the guesses whenever a unit
+-- passes through target, focus or mouseover means the stored data stays right
+-- after you stop looking at it.
+function Auras.SyncFromUnit(guid, unit)
+	if not guid or guid == "" or not unit or not UnitExists(unit) then return end
 
-	for _, filter in ipairs({ "HARMFUL", "HELPFUL" }) do
+	local bucket = Bucket(guid)
+	for _, aura in pairs(bucket) do aura.seen = false end
+
+	for f = 1, #FILTERS do
+		local filter = FILTERS[f]
 		for i = 1, 40 do
 			local name, _, icon, count, dispelType, duration, expires, caster,
-			      isStealable, _, spellId = UnitAura(unit, i, filter)
+			      _, _, spellId = UnitAura(unit, i, filter)
 			if not name then break end
-			n = n + 1
-			local a = out[n]
-			if not a then a = {}; out[n] = a end
-			a.key        = (spellId or name) .. "@" .. tostring(caster)
-			a.spellId    = spellId
-			a.name       = name
-			a.icon       = icon
-			a.count      = (count and count > 0) and count or 1
-			a.dispelType = dispelType
-			a.duration   = (duration and duration > 0) and duration or nil
-			a.expires    = (expires and expires > 0) and expires or nil
-			a.mine       = (caster == "player" or caster == "pet" or caster == "vehicle")
-			a.type       = (filter == "HARMFUL") and "DEBUFF" or "BUFF"
-			a.exact      = true
-			a.school     = nil
+
+			local mine = (caster == "player" or caster == "pet" or caster == "vehicle")
+			local key = KeyFor(spellId, name, mine)
+
+			local aura = bucket[key]
+			if not aura then aura = {}; bucket[key] = aura end
+
+			aura.key        = key
+			aura.spellId    = spellId
+			aura.name       = name
+			aura.icon       = icon
+			aura.count      = (count and count > 0) and count or 1
+			aura.dispelType = dispelType
+			aura.duration   = (duration and duration > 0) and duration or nil
+			aura.expires    = (expires and expires > 0) and expires or nil
+			aura.mine       = mine
+			aura.type       = (filter == "HARMFUL") and "DEBUFF" or "BUFF"
+			aura.applied    = aura.applied or GetTime()
+			aura.exact      = true
+			aura.seen       = true
 		end
 	end
 
-	for i = n + 1, #out do out[i] = nil end
-	return n
+	-- the scan covers the whole unit, so anything it did not report is gone
+	for key, aura in pairs(bucket) do
+		if not aura.seen then bucket[key] = nil end
+	end
 end
+
+-- Units we can read exactly. Syncing on UNIT_AURA catches changes as they
+-- happen; the ticker catches durations being refreshed without an event.
+local syncFrame = CreateFrame("Frame")
+syncFrame:RegisterEvent("UNIT_AURA")
+syncFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
+syncFrame:RegisterEvent("PLAYER_FOCUS_CHANGED")
+syncFrame:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
+
+local SYNC_UNITS = { "target", "focus", "mouseover" }
+
+local function SyncVisibleUnits()
+	for i = 1, #SYNC_UNITS do
+		local unit = SYNC_UNITS[i]
+		if UnitExists(unit) then Auras.SyncFromUnit(UnitGUID(unit), unit) end
+	end
+end
+
+syncFrame:SetScript("OnEvent", function(self, event, arg1)
+	if event == "UNIT_AURA" then
+		if arg1 == "target" or arg1 == "focus" or arg1 == "mouseover" then
+			Auras.SyncFromUnit(UnitGUID(arg1), arg1)
+		end
+	else
+		SyncVisibleUnits()
+	end
+end)
+
+Util.NewTicker(0.25, SyncVisibleUnits)
 
 -- Every aura currently tracked for any unit sharing this name. Only used when
 -- the profile explicitly asks for name matching: it is what caused one mob's
@@ -254,13 +308,15 @@ local function CollectByName(plateName, out)
 end
 
 -- Returns an array of aura tables for a plate.
+--
 -- `guid` is the unit the plate has been matched to, and is what the tracking is
 -- keyed by; without one there is no honest answer and we return nothing.
--- `unitToken` is optional; when supplied the exact API data is used instead.
--- `scratch` must be a table owned by the caller: the exact path writes aura
--- tables into it and `result` holds references to them, so sharing one buffer
--- between plates would let one plate's refresh overwrite another's timers.
-function Auras.Collect(guid, plateName, unitToken, result, scratch)
+--
+-- There is deliberately no separate path for "this plate is your target". The
+-- store already holds exact data for anything you can see exactly, written
+-- there by SyncFromUnit, so a plate shows the same thing whether or not you
+-- happen to be looking at its unit.
+function Auras.Collect(guid, plateName, result)
 	local db = ns.db.auras
 	local now = GetTime()
 
@@ -268,12 +324,7 @@ function Auras.Collect(guid, plateName, unitToken, result, scratch)
 	if not db.enabled then return result end
 
 	local source
-	if unitToken and UnitExists(unitToken) then
-		local buffer = scratch or exactBuffer
-		ReadUnitAuras(unitToken, buffer)
-		source = buffer
-
-	elseif guid and store[guid] then
+	if guid and store[guid] then
 		for i = #logBuffer, 1, -1 do logBuffer[i] = nil end
 		for _, aura in pairs(store[guid]) do logBuffer[#logBuffer + 1] = aura end
 		source = logBuffer

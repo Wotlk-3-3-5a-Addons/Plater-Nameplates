@@ -430,7 +430,6 @@ local function CreateUnitFrame(plate)
 	f.auraFrame = af
 
 	f.auraList = {}
-	f.auraScratch = {}
 	f.plate = plate
 	-- provisional anchor; ApplyPosition replaces this CENTER point every frame
 	f:SetPoint("CENTER", plate, "CENTER", 0, 0)
@@ -934,12 +933,7 @@ local function UpdateAuras(f)
 		return
 	end
 
-	local token = nil
-	if f.isTarget then token = "target"
-	elseif f.isMouseover then token = "mouseover"
-	elseif UnitExists("focus") and UnitName("focus") == f.unitName then token = "focus" end
-
-	Auras.Collect(f.unitGUID, f.unitName, token, f.auraList, f.auraScratch)
+	Auras.Collect(f.unitGUID, f.unitName, f.auraList)
 
 	local count = #f.auraList
 	f.auraCount = count
@@ -1224,10 +1218,8 @@ local function UpdatePlate(f)
 
 	-- target / mouseover ------------------------------------------------------
 	local hasTarget = UnitExists("target")
-	local isTarget = false
-	if hasTarget and f.plate:GetAlpha() >= 0.99 then
-		isTarget = (UnitName("target") == name)
-	end
+	-- decided once per tick across all plates, so exactly one can be the target
+	local isTarget = (Core.targetFrame == f)
 	f.isTarget = isTarget
 	f.isMouseover = (r.highlight and r.highlight:IsShown()) and true or false
 
@@ -1552,19 +1544,46 @@ runner:SetScript("OnUpdate", function(self, elapsed)
 		Core.tickInterval = sinceUpdate
 		sinceUpdate = 0
 
-		-- Count how many visible plates share each name before updating any of
-		-- them. A plate can only be matched to a unit by name when it is the
-		-- only one wearing that name, and it cannot know that on its own.
+		-- Survey every plate before updating any of them, because two of the
+		-- decisions below cannot be made by a plate looking only at itself.
+		--
+		-- Which plate is the target: the client marks it by leaving it at full
+		-- alpha while the others fade, but during that fade more than one plate
+		-- is briefly at full alpha, and with two mobs sharing a name the name
+		-- does not separate them either. A plate that wrongly decides it is the
+		-- target binds itself to the target's unit, and since binding is
+		-- exclusive that quietly steals the identity - and the auras - from the
+		-- plate that actually owned it. Pick exactly one winner here instead,
+		-- preferring whichever plate already holds the target's guid.
+		--
+		-- How many plates share each name: needed for the name-matching
+		-- shortcut, which is only safe when a name identifies one plate.
 		local counts = Core.nameCounts
 		wipe(counts)
+
+		local targetName = UnitExists("target") and UnitName("target") or nil
+		local targetGUID = targetName and UnitGUID("target") or nil
+		local best, bestScore = nil, 0
+
 		for plate, f in pairs(Core.active) do
 			if plate:IsShown() and f.regions and f.regions.name then
 				local plateName = f.regions.name:GetText()
 				if plateName and plateName ~= "" then
 					counts[plateName] = (counts[plateName] or 0) + 1
+
+					if targetName and plateName == targetName then
+						local alpha = plate:GetAlpha()
+						if alpha >= 0.99 then
+							-- an established binding outranks any alpha reading
+							local score = (f.unitGUID == targetGUID) and 2 or alpha
+							if score > bestScore then best, bestScore = f, score end
+						end
+					end
 				end
 			end
 		end
+
+		Core.targetFrame = best
 
 		for plate, f in pairs(Core.active) do
 			if plate:IsShown() then
