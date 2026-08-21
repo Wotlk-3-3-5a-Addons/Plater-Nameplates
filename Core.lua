@@ -1670,6 +1670,9 @@ end)
 
 function Core.FullUpdate()
 	Core.settingsGeneration = Core.settingsGeneration + 1
+	-- the filter lists are matched through an index, so rebuild it here: every
+	-- path that edits them ends up calling this
+	if Auras.RebuildFilterIndex then Auras.RebuildFilterIndex() end
 	for _, f in pairs(Core.active) do
 		f.curAlpha, f.curScale = nil, nil
 		f.forceAuraUpdate = true

@@ -1204,6 +1204,20 @@ SlashCmdList["PLATERWRATH"] = function(input)
 		ns.Core.FullUpdate()
 		Util.Print(("|cffffd100%s|r %s the %s."):format(
 			rest, add and "added to" or "removed from", listName))
+
+		-- Matching is case-insensitive, but a name that is simply wrong still
+		-- silently does nothing, which is indistinguishable from a broken
+		-- filter. Say so while the player is still looking.
+		if add then
+			local realName = ns.Auras.FindTrackedName(rest)
+			if not realName then
+				Util.Print("|cffffd100note:|r nothing currently tracked is called that. "
+					.. "|cffffd100/plater auras|r lists the real names on your target, or "
+					.. "hover an icon on a nameplate and right click it to hide exactly that spell.")
+			elseif realName ~= rest then
+				Util.Print(("matched |cffffd100%s|r."):format(realName))
+			end
+		end
 	end
 
 	if cmd == "blacklist" then

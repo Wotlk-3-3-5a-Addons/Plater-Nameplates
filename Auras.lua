@@ -210,6 +210,50 @@ end)
 local logBuffer = {}
 local FILTERS = { "HARMFUL", "HELPFUL" }
 
+--------------------------------------------------------------------------------
+-- filter lists
+--
+-- Matching spell names exactly is too brittle to put in front of a player. The
+-- name has to be reproduced character for character, capitals included, and a
+-- near miss fails silently and looks like the filter is broken rather than like
+-- a typo. Compare case-insensitively and ignore surrounding whitespace, off an
+-- index rebuilt whenever the lists change.
+--------------------------------------------------------------------------------
+
+local blackIndex, whiteIndex = {}, {}
+
+function Auras.RebuildFilterIndex()
+	wipe(blackIndex)
+	wipe(whiteIndex)
+
+	local db = ns.db and ns.db.auras
+	if not db then return end
+
+	for name, on in pairs(db.blacklist or {}) do
+		if on and type(name) == "string" then
+			blackIndex[strtrim(name):lower()] = true
+		end
+	end
+	for name, on in pairs(db.whitelist or {}) do
+		if on and type(name) == "string" then
+			whiteIndex[strtrim(name):lower()] = true
+		end
+	end
+end
+
+-- Is anything currently tracked called this? Used to tell a player who has
+-- filtered a name that matches nothing, instead of silently accepting it.
+function Auras.FindTrackedName(name)
+	if not name or name == "" then return nil end
+	local wanted = strtrim(name):lower()
+	for _, bucket in pairs(store) do
+		for _, aura in pairs(bucket) do
+			if aura.name and aura.name:lower() == wanted then return aura.name end
+		end
+	end
+	return nil
+end
+
 -- Write what the API actually reports for a unit straight into that unit's
 -- bucket, replacing whatever the combat log had inferred.
 --
@@ -343,6 +387,7 @@ function Auras.Collect(guid, plateName, result)
 		local aura = source[i]
 		if aura and aura.name then
 			local pass = true
+			local key = aura.name:lower()
 
 			if aura.type == "BUFF" and not db.showBuffs then pass = false end
 			if aura.type == "DEBUFF" and not db.showDebuffs then pass = false end
@@ -351,11 +396,11 @@ function Auras.Collect(guid, plateName, result)
 				if db.filter == "mine" then
 					pass = aura.mine and true or false
 				elseif db.filter == "whitelist" then
-					pass = db.whitelist[aura.name] and true or false
+					pass = whiteIndex[key] and true or false
 				end
 			end
 
-			if pass and db.blacklist[aura.name] then pass = false end
+			if pass and blackIndex[key] then pass = false end
 			if pass and aura.expires and aura.expires <= now then pass = false end
 
 			if pass then
