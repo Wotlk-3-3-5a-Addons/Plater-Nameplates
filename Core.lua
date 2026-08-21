@@ -371,6 +371,7 @@ local function CreateUnitFrame(plate)
 	f.auraFrame = af
 
 	f.auraList = {}
+	f.auraScratch = {}
 	f.plate = plate
 	-- provisional anchor; PositionFrame replaces this CENTER point every tick
 	f:SetPoint("CENTER", plate, "CENTER", 0, 0)
@@ -510,6 +511,41 @@ local function ApplyClickArea(f)
 	if db.clickHeight > 0 then plate:SetHeight(db.clickHeight) end
 end
 
+-- Sizing the plate is not enough on its own: the client anchors it to the unit,
+-- so once you offset the health bar the bar no longer sits over the hit box and
+-- stops being clickable. Hit rect insets fix that - negative insets push an
+-- edge outwards - so we shift the plate's clickable box onto wherever the bar
+-- actually is, however far it has been offset.
+local function ApplyHitRect(f, scale)
+	local db, plate = ns.db, f.plate
+
+	if not db.resizeClickArea then
+		plate:SetHitRectInsets(0, 0, 0, 0)
+		return
+	end
+
+	local ps = plate:GetEffectiveScale()
+	if not ps or ps == 0 then return end
+
+	-- our artwork is measured in our frame's units; convert to the plate's
+	local r = ((f:GetEffectiveScale() or ps)) / ps
+	local calib = Core.calib
+	local dx = (calib and calib.dx or 0) + db.xOffset * r
+	local dy = (calib and calib.dy or 0) + db.yOffset * r
+
+	local halfW = ((db.clickWidth  > 0) and db.clickWidth  or db.width)  * r / 2
+	local halfH = ((db.clickHeight > 0) and db.clickHeight or db.height) * r / 2
+
+	local pw = plate:GetWidth()  / 2
+	local ph = plate:GetHeight() / 2
+
+	plate:SetHitRectInsets(
+		dx - halfW + pw,      -- left
+		pw - dx - halfW,      -- right
+		ph - dy - halfH,      -- top
+		dy - halfH + ph)      -- bottom
+end
+
 local function PositionFrame(f, dt)
 	local db = ns.db
 	local plate = f.plate
@@ -643,9 +679,10 @@ local function UpdateAuras(f)
 	elseif f.isMouseover then token = "mouseover"
 	elseif UnitExists("focus") and UnitName("focus") == f.unitName then token = "focus" end
 
-	Auras.Collect(f.unitName, token, f.auraList)
+	Auras.Collect(f.unitName, token, f.auraList, f.auraScratch)
 
 	local count = #f.auraList
+	f.auraCount = count
 	local now = GetTime()
 
 	for i = 1, count do
@@ -693,6 +730,7 @@ local function UpdateAuras(f)
 
 	if count == 0 then
 		af:Hide()
+		f.auraCount = 0
 		return
 	end
 
@@ -720,6 +758,38 @@ local function UpdateAuras(f)
 	end
 
 	af:Show()
+end
+
+-- Only the countdown text, no filtering or re-sorting. Split out from
+-- UpdateAuras so timers can tick at display rate without paying for a full
+-- collect, filter and sort every frame.
+local function RefreshAuraTimers(f)
+	local db = ns.db.auras
+	if not db.showTimer then return end
+
+	local count = f.auraCount or 0
+	if count == 0 then return end
+
+	local icons = f.auraFrame.icons
+	local now = GetTime()
+
+	for i = 1, count do
+		local icon = icons[i]
+		local aura = f.auraList[i]
+		if icon and aura and icon:IsShown() then
+			if aura.expires then
+				local remain = aura.expires - now
+				icon.timer:SetText(Util.FormatTime(remain, db.timerDecimals))
+				if remain <= 3 then
+					icon.timer:SetTextColor(1, 0.3, 0.3)
+				else
+					icon.timer:SetTextColor(1, 1, 1)
+				end
+			else
+				icon.timer:SetText("")
+			end
+		end
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -1017,7 +1087,13 @@ local function UpdatePlate(f)
 		f.curScale = scale
 	end
 
-	PositionFrame(f, dt)
+	-- the hit box follows the bar's size, scale and offset, so recompute it
+	-- whenever any of those change rather than every frame
+	if f.hitScale ~= scale or f.hitGeneration ~= Core.settingsGeneration then
+		f.hitScale = scale
+		f.hitGeneration = Core.settingsGeneration
+		ApplyHitRect(f, scale)
+	end
 
 	local alpha
 	if not hasTarget then
@@ -1125,7 +1201,7 @@ Core.settingsGeneration = 1
 Core.tickInterval = 0.03
 
 local runner = CreateFrame("Frame")
-local sinceUpdate, sinceScan = 0, 0
+local sinceUpdate, sinceScan, sinceTimers = 0, 0, 0
 
 runner:SetScript("OnUpdate", function(self, elapsed)
 	-- nothing may touch plates before the saved variables are loaded
@@ -1138,17 +1214,33 @@ runner:SetScript("OnUpdate", function(self, elapsed)
 		if not ok then Util.Error(err) end
 	end
 
+	-- The expensive pass: colours, text, auras, threat, cast bar. Throttled,
+	-- because none of it needs to run at display rate.
 	sinceUpdate = sinceUpdate + elapsed
-	if sinceUpdate < ns.db.updateInterval then return end
-	Core.tickInterval = sinceUpdate
-	sinceUpdate = 0
+	if sinceUpdate >= ns.db.updateInterval then
+		Core.tickInterval = sinceUpdate
+		sinceUpdate = 0
+		for plate, f in pairs(Core.active) do
+			if plate:IsShown() then
+				local ok, err = pcall(UpdatePlate, f)
+				if not ok then Util.Error(err) end
+			elseif f:IsShown() then
+				f:Hide()
+			end
+		end
+	end
 
-	for plate, f in pairs(Core.active) do
-		if plate:IsShown() then
-			local ok, err = pcall(UpdatePlate, f)
-			if not ok then Util.Error(err) end
-		elseif f:IsShown() then
-			f:Hide()
+	-- Movement runs every rendered frame. Easing a position on the throttled
+	-- tick above only moves plates ~30 times a second, which reads as stepping
+	-- rather than gliding however gentle the easing is.
+	sinceTimers = sinceTimers + elapsed
+	local doTimers = sinceTimers >= (ns.db.auras.timerRate or 0.03)
+	if doTimers then sinceTimers = 0 end
+
+	for _, f in pairs(Core.active) do
+		if f:IsShown() then
+			PositionFrame(f, elapsed)
+			if doTimers then RefreshAuraTimers(f) end
 		end
 	end
 end)

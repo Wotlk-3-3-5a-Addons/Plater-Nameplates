@@ -106,8 +106,9 @@ Script API (`Plater.` or `PlaterW.`): `SetNameplateColor`, `ResetNameplateColor`
    target from a custom frame without a unit token. Instead the addon resizes the plate
    frame to match the health bar, so the bar you see is the box you click — and because
    the client spaces plates apart using those same dimensions, that is also what stops
-   plates overlapping each other. Turn it off, or tune the box independently of the bar,
-   under General → Clickable area.
+   plates overlapping each other. The hit box is also shifted onto the bar with hit rect
+   insets, so the bar stays clickable however far you offset it from the unit. Turn it
+   off, or tune the box independently of the bar, under General → Clickable area.
 5. **No wago.io / WeakAuras-Companion.** Companion talks to retail Plater's import format
    and to a running WeakAuras install; neither applies here. Import/export uses this
    addon's own plain-Lua format.

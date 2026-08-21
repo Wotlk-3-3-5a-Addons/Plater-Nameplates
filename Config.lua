@@ -115,8 +115,8 @@ ns.defaults = {
 		showStacks  = true,
 		showTimer   = true,
 		timerSize   = 9,
-		timerDecimals = 1,        -- fractional digits shown under a minute
-		timerRate     = 0.05,     -- how often aura timers redraw, seconds
+		timerDecimals = 3,        -- fractional digits shown under a minute
+		timerRate     = 0.03,     -- how often aura timers redraw, seconds
 		stackSize   = 10,
 		borderByType= true,           -- color icon border by debuff school
 		blacklist   = {},             -- [spellName] = true
@@ -192,6 +192,25 @@ function Config.Initialize()
 
 	ns.activeProfile = wanted
 	ns.db = Util.ApplyDefaults(PlaterWrathDB.profiles[wanted], ns.defaults)
+	Config.Migrate(ns.db)
+end
+
+-- Runs after defaults are filled in. `dbVersion` is deliberately absent from
+-- ns.defaults: if it had a default, ApplyDefaults would stamp the current
+-- version onto old profiles and every migration would be skipped.
+local DB_VERSION = 2
+
+function Config.Migrate(profile)
+	local version = profile.dbVersion or 1
+
+	if version < 2 then
+		-- aura timers gained sub-second precision; existing profiles were
+		-- saved with whole-second formatting and a slow redraw
+		profile.auras.timerDecimals = 3
+		profile.auras.timerRate = 0.03
+	end
+
+	profile.dbVersion = DB_VERSION
 end
 
 function Config.GetProfileList()
@@ -209,6 +228,7 @@ function Config.SetProfile(name)
 	PlaterWrathDB.profileKeys[CharKey()] = name
 	ns.activeProfile = name
 	ns.db = Util.ApplyDefaults(PlaterWrathDB.profiles[name], ns.defaults)
+	Config.Migrate(ns.db)
 	if ns.Core then ns.Core.FullUpdate() end
 	if ns.Scripting then ns.Scripting.CompileAll() end
 	Util.Print("profile set to |cffffd100" .. name .. "|r")

@@ -230,9 +230,12 @@ local function ReadUnitAuras(unit, out)
 	return n
 end
 
--- returns an array of aura tables for a plate.
+-- Returns an array of aura tables for a plate.
 -- `unitToken` is optional; when supplied the exact API data is used.
-function Auras.Collect(plateName, unitToken, result)
+-- `scratch` must be a table owned by the caller: the exact path writes aura
+-- tables into it and `result` holds references to them, so sharing one buffer
+-- between plates would let one plate's refresh overwrite another's timers.
+function Auras.Collect(plateName, unitToken, result, scratch)
 	local db = ns.db.auras
 	local now = GetTime()
 
@@ -241,8 +244,9 @@ function Auras.Collect(plateName, unitToken, result)
 
 	local source
 	if unitToken and UnitExists(unitToken) then
-		ReadUnitAuras(unitToken, exactBuffer)
-		source = exactBuffer
+		local buffer = scratch or exactBuffer
+		ReadUnitAuras(unitToken, buffer)
+		source = buffer
 	else
 		local bucket = store[plateName]
 		if not bucket then return result end

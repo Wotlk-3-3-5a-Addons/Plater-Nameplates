@@ -603,7 +603,7 @@ local function BuildAuras(panel)
 	end, function() return a().growth end, function(v) a().growth = v end))
 	L:Add(Widgets.CheckBox(c, "Show timers", nil,
 		function() return a().showTimer end, function(v) a().showTimer = v end))
-	L:Add(Widgets.Slider(c, "Timer decimals", 0, 2, 1,
+	L:Add(Widgets.Slider(c, "Timer decimals", 0, 3, 1,
 		function() return a().timerDecimals end, function(v) a().timerDecimals = v end))
 	L:Add(Widgets.Slider(c, "Timer refresh rate (seconds)", 0.02, 0.5, 0.01,
 		function() return a().timerRate end, function(v) a().timerRate = v end))
