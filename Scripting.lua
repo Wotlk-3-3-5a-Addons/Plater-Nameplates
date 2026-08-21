@@ -125,6 +125,17 @@ function API.HasAura(unitFrame, spellName)
 	return false
 end
 
+-- The nameplate currently serving this unit, or nil if none is matched to it.
+-- Other addons use this to attach their own artwork to a unit's plate: there is
+-- no unit token on 3.3.5a, so the guid binding here is the only reliable link
+-- between a combat log event and a place on screen.
+function API.GetNameplateForGUID(guid)
+	if not guid or not ns.Core then return nil end
+	local frame = ns.Core.guidOwner[guid]
+	if frame and frame:IsShown() then return frame end
+	return nil
+end
+
 function API.ForEachPlate(func)
 	if not ns.Core then return end
 	for plate, frame in pairs(ns.Core.active) do
