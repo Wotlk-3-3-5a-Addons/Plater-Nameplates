@@ -1184,8 +1184,63 @@ end
 
 SLASH_PLATERWRATH1 = "/plater"
 SLASH_PLATERWRATH2 = "/plw"
-SlashCmdList["PLATERWRATH"] = function(msg)
-	msg = strtrim(msg or ""):lower()
+SlashCmdList["PLATERWRATH"] = function(input)
+	-- split before lowercasing: spell names are matched exactly, so the
+	-- argument has to keep the capitals the game gave it
+	local raw = strtrim(input or "")
+	local cmd, rest = raw:match("^(%S*)%s*(.*)$")
+	cmd = (cmd or ""):lower()
+	rest = strtrim(rest or "")
+
+	local function EditList(list, listName, add)
+		if rest == "" then
+			Util.Print("usage: |cffffd100/plater " .. cmd .. " Shadow Bolt|r")
+			return
+		end
+		list[rest] = add or nil
+		ns.Core.FullUpdate()
+		Util.Print(("|cffffd100%s|r %s the %s."):format(
+			rest, add and "added to" or "removed from", listName))
+	end
+
+	if cmd == "blacklist" then
+		EditList(ns.db.auras.blacklist, "blacklist", true)
+		return
+	elseif cmd == "unblacklist" then
+		EditList(ns.db.auras.blacklist, "blacklist", false)
+		return
+	elseif cmd == "whitelist" then
+		EditList(ns.db.auras.whitelist, "whitelist", true)
+		return
+	elseif cmd == "unwhitelist" then
+		EditList(ns.db.auras.whitelist, "whitelist", false)
+		return
+
+	elseif cmd == "auras" then
+		-- Names have to match exactly to be filtered, so print the real ones
+		-- rather than leaving them to be guessed or typed from memory.
+		local guid = UnitExists("target") and UnitGUID("target") or nil
+		if not guid then
+			Util.Print("target something first, then |cffffd100/plater auras|r lists what is tracked on it.")
+			return
+		end
+		local bucket = ns.Auras.store[guid]
+		if not bucket or not next(bucket) then
+			Util.Print("nothing tracked on " .. (UnitName("target") or "your target") .. " right now.")
+			return
+		end
+		Util.Print("tracked on |cffffd100" .. (UnitName("target") or "?") .. "|r:")
+		for _, aura in pairs(bucket) do
+			Util.Print(("   %s%s|r  %s%s"):format(
+				aura.mine and "|cff66ff66" or "|cffaaaaaa",
+				tostring(aura.name),
+				aura.type == "BUFF" and "buff" or "debuff",
+				ns.db.auras.blacklist[aura.name] and "  |cffff5555blacklisted|r" or ""))
+		end
+		return
+	end
+
+	local msg = cmd
 
 	if msg == "" or msg == "config" or msg == "options" then
 		Options.Toggle()
@@ -1223,6 +1278,9 @@ SlashCmdList["PLATERWRATH"] = function(msg)
 			n, Util.CountTable(ns.db.mods), ns.Config.GetActiveProfile()))
 	else
 		Util.Print("commands: |cffffd100/plater|r config, toggle, enemy, friendly, reset, minimap, wipeauras, status, debug, errors")
+		Util.Print("auras: |cffffd100/plater auras|r lists what is tracked on your target, "
+			.. "|cffffd100/plater blacklist Shadow Bolt|r hides one, "
+			.. "|cffffd100/plater unblacklist Shadow Bolt|r puts it back.")
 	end
 end
 
