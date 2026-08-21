@@ -1,0 +1,1143 @@
+--[[--------------------------------------------------------------------------
+	PlaterWrath - Core.lua
+
+	The nameplate engine.
+
+	On 3.3.5a a nameplate is an anonymous frame parented to WorldFrame. There is
+	no NAME_PLATE_UNIT_ADDED event and no nameplateN unit token, so the engine
+	works the way every WotLK nameplate addon has to:
+
+	  1. watch WorldFrame:GetNumChildren() for new children
+	  2. recognise the ones that are nameplates by their Blizzard artwork
+	  3. hide Blizzard's art (alpha 0 - the widgets stay readable, which is how
+	     we keep getting health, reaction, threat, cast and raid icon state)
+	  4. build our own frame parented to WorldFrame and anchored to the plate,
+	     so Blizzard's distance fading cannot touch our alpha
+	  5. poll everything on a throttled OnUpdate
+
+	Everything the addon knows about a unit that is not on the plate itself
+	(class, player vs npc, aura durations) comes from Cache.lua.
+----------------------------------------------------------------------------]]
+
+local ADDON, ns = ...
+local Util      = ns.Util
+local Cache     = ns.Cache
+local Auras     = ns.Auras
+local Scripting = ns.Scripting
+
+local Core = {}
+ns.Core = Core
+
+Core.active   = {}   -- [plate] = unitFrame
+Core.allPlates = {}  -- [plate] = true
+
+local WorldFrame  = WorldFrame
+local UnitExists  = UnitExists
+local UnitName    = UnitName
+local GetTime     = GetTime
+
+local constructorGeneration = 1
+
+--------------------------------------------------------------------------------
+-- plate identification
+--------------------------------------------------------------------------------
+
+local function LooksLikeNameplateTexture(region)
+	if region:GetObjectType() ~= "Texture" then return false end
+	local path = region:GetTexture()
+	if type(path) ~= "string" then return false end
+	return path:lower():find("nameplate") ~= nil
+end
+
+local function IsNamePlate(frame)
+	if frame.isPlaterWrathFrame then return false end
+	if frame:GetName() then return false end
+	if frame:GetObjectType() ~= "Frame" then return false end
+
+	local health, cast = frame:GetChildren()
+	if not health or not cast then return false end
+	if health:GetObjectType() ~= "StatusBar" then return false end
+	if cast:GetObjectType() ~= "StatusBar" then return false end
+
+	-- the border texture proves this is Blizzard's plate and not some other
+	-- addon's WorldFrame child
+	for i = 1, select("#", health:GetRegions()) do
+		if LooksLikeNameplateTexture((select(i, health:GetRegions()))) then return true end
+	end
+	for i = 1, select("#", frame:GetRegions()) do
+		if LooksLikeNameplateTexture((select(i, frame:GetRegions()))) then return true end
+	end
+	return false
+end
+
+--------------------------------------------------------------------------------
+-- region classification
+--
+-- The documented 3.3.5a layout is
+--     healthBar regions : threatGlow, healthBorder, highlight, name, level,
+--                         bossIcon, raidIcon, eliteIcon
+--     castBar   regions : castBorder, castNoStop, spellIcon, spellText, shadow
+-- We take that order first and fall back to inspecting every region if the
+-- client (or a private-server UI patch) put them somewhere else.
+--------------------------------------------------------------------------------
+
+local function ClassifyByOrder(o, health, cast, plate)
+	local g, hb, hl, nm, lv, boss, raid, elite = health:GetRegions()
+	if nm and nm:GetObjectType() == "FontString" and lv and lv:GetObjectType() == "FontString" then
+		o.threatGlow, o.healthBorder, o.highlight = g, hb, hl
+		o.name, o.level = nm, lv
+		o.bossIcon, o.raidIcon, o.eliteIcon = boss, raid, elite
+		return true
+	end
+	return false
+end
+
+local function ClassifyByInspection(o, health, cast, plate)
+	local fontStrings, textures = {}, {}
+
+	local function collect(frame)
+		if not frame then return end
+		for i = 1, select("#", frame:GetRegions()) do
+			local reg = select(i, frame:GetRegions())
+			local t = reg:GetObjectType()
+			if t == "FontString" then
+				fontStrings[#fontStrings + 1] = reg
+			elseif t == "Texture" then
+				textures[#textures + 1] = reg
+			end
+		end
+	end
+	collect(health)
+	collect(plate)
+
+	for _, tex in ipairs(textures) do
+		local path = tex:GetTexture()
+		path = (type(path) == "string") and path:lower() or ""
+		if path:find("nameplate%-glow") then
+			o.threatGlow = o.threatGlow or tex
+		elseif path:find("raidtargeticon") or path:find("raidtargetingicon") then
+			o.raidIcon = o.raidIcon or tex
+		elseif path:find("elite") then
+			o.eliteIcon = o.eliteIcon or tex
+		elseif path:find("skull") then
+			o.bossIcon = o.bossIcon or tex
+		elseif path:find("nameplate%-border") then
+			if tex:GetBlendMode() == "ADD" then
+				o.highlight = o.highlight or tex
+			else
+				o.healthBorder = o.healthBorder or tex
+			end
+		end
+	end
+
+	-- whichever font string holds a number is the level
+	for _, fs in ipairs(fontStrings) do
+		local text = fs:GetText()
+		if text and tonumber(text) then
+			o.level = o.level or fs
+		else
+			o.name = o.name or fs
+		end
+	end
+	if not o.name and fontStrings[1] then o.name = fontStrings[1] end
+	if not o.level and fontStrings[2] then o.level = fontStrings[2] end
+end
+
+local function ClassifyCast(o, cast)
+	local b1, b2, r3, r4, r5 = cast:GetRegions()
+	if r4 and r4:GetObjectType() == "FontString" and r3 and r3:GetObjectType() == "Texture" then
+		o.castBorder, o.castNoStop, o.spellIcon, o.spellText, o.castShadow = b1, b2, r3, r4, r5
+		return
+	end
+	for i = 1, select("#", cast:GetRegions()) do
+		local reg = select(i, cast:GetRegions())
+		if reg:GetObjectType() == "FontString" then
+			o.spellText = o.spellText or reg
+		else
+			local path = reg:GetTexture()
+			path = (type(path) == "string") and path:lower() or ""
+			if path:find("nameplate") or path:find("castingbar") then
+				if not o.castBorder then o.castBorder = reg
+				elseif not o.castNoStop then o.castNoStop = reg end
+			else
+				o.spellIcon = o.spellIcon or reg
+			end
+		end
+	end
+end
+
+local function CountFontStrings(frame)
+	local n = 0
+	for i = 1, select("#", frame:GetRegions()) do
+		if select(i, frame:GetRegions()):GetObjectType() == "FontString" then n = n + 1 end
+	end
+	return n
+end
+
+local function ClassifyPlate(plate)
+	local first, second = plate:GetChildren()
+	if not first or not second then return {} end
+
+	-- Blizzard's order is health then cast, but do not take that on faith: the
+	-- health bar carries two font strings (name and level), the cast bar one.
+	local health, cast = first, second
+	if CountFontStrings(second) > CountFontStrings(first) then
+		health, cast = second, first
+	end
+
+	local o = { health = health, cast = cast }
+	if not ClassifyByOrder(o, health, cast, plate) then
+		ClassifyByInspection(o, health, cast, plate)
+	end
+	ClassifyCast(o, cast)
+
+	-- Every region Blizzard draws, wherever it lives. Which frame owns the
+	-- border / name / level artwork varies between 3.3.5a builds, so we do not
+	-- guess: we collect the lot and blank all of it.
+	local all = {}
+	local function collect(frame)
+		if not frame then return end
+		for i = 1, select("#", frame:GetRegions()) do
+			all[#all + 1] = select(i, frame:GetRegions())
+		end
+	end
+	collect(plate)
+	collect(health)
+	collect(cast)
+	o.allRegions = all
+
+	return o
+end
+
+--------------------------------------------------------------------------------
+-- hiding Blizzard's plate
+--
+-- SetAlpha(0) instead of SetTexture(nil): the widgets keep every property we
+-- need to read (status bar color, vertex color of the threat glow, shown state
+-- of the mouseover highlight, tex coords of the raid icon) and simply stop
+-- drawing. Blizzard's C side only ever sets alpha on the plate frame itself,
+-- so our zero on the children survives.
+--------------------------------------------------------------------------------
+
+local function HideBlizzardArt(o)
+	if o.health then o.health:SetAlpha(0) end
+	if o.cast then o.cast:SetAlpha(0) end
+	local all = o.allRegions
+	if all then
+		for i = 1, #all do all[i]:SetAlpha(0) end
+	end
+end
+
+--------------------------------------------------------------------------------
+-- building our nameplate
+--------------------------------------------------------------------------------
+
+local function CreateAuraIcon(parent, index)
+	local icon = CreateFrame("Frame", nil, parent)
+	icon:SetFrameLevel(parent:GetFrameLevel() + 1)
+
+	icon.texture = icon:CreateTexture(nil, "ARTWORK")
+	icon.texture:SetAllPoints(icon)
+	icon.texture:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+
+	icon.border = Util.CreateBorder(icon, 1)
+	icon.border:SetFrameLevel(icon:GetFrameLevel() + 1)
+
+	icon.timer = icon:CreateFontString(nil, "OVERLAY")
+	icon.timer:SetPoint("BOTTOM", icon, "BOTTOM", 0, -2)
+
+	icon.stacks = icon:CreateFontString(nil, "OVERLAY")
+	icon.stacks:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", 2, 0)
+
+	icon:Hide()
+	return icon
+end
+
+local function CreateUnitFrame(plate)
+	local f = CreateFrame("Frame", nil, WorldFrame)
+	f.isPlaterWrathFrame = true
+	f:SetFrameStrata("BACKGROUND")
+	f:SetFrameLevel(1)
+	f:SetWidth(120)
+	f:SetHeight(12)
+	f:Hide()
+
+	-- health ------------------------------------------------------------------
+	local hb = CreateFrame("StatusBar", nil, f)
+	hb:SetPoint("CENTER", f, "CENTER", 0, 0)
+	hb:SetFrameLevel(f:GetFrameLevel() + 1)
+	hb:SetMinMaxValues(0, 1)
+	hb:SetValue(1)
+	f.healthBar = hb
+
+	hb.bg = hb:CreateTexture(nil, "BACKGROUND")
+	hb.bg:SetAllPoints(hb)
+	hb.bg:SetTexture(Util.BLANK)
+
+	f.healthBorder = Util.CreateBorder(hb, 1)
+	f.healthBorder:SetFrameLevel(hb:GetFrameLevel() + 2)
+
+	-- a soft outer glow used for the target highlight
+	f.targetGlow = hb:CreateTexture(nil, "BACKGROUND")
+	f.targetGlow:SetTexture(Util.BLANK)
+	f.targetGlow:SetPoint("TOPLEFT", hb, "TOPLEFT", -3, 3)
+	f.targetGlow:SetPoint("BOTTOMRIGHT", hb, "BOTTOMRIGHT", 3, -3)
+	f.targetGlow:Hide()
+
+	-- text --------------------------------------------------------------------
+	f.nameText = hb:CreateFontString(nil, "OVERLAY")
+	f.nameText:SetPoint("BOTTOM", hb, "TOP", 0, 2)
+
+	f.levelText = hb:CreateFontString(nil, "OVERLAY")
+	f.levelText:SetPoint("RIGHT", hb, "LEFT", -3, 0)
+
+	f.healthText = hb:CreateFontString(nil, "OVERLAY")
+	f.healthText:SetPoint("CENTER", hb, "CENTER", 0, 0)
+
+	-- indicators ---------------------------------------------------------------
+	f.raidIcon = hb:CreateTexture(nil, "OVERLAY")
+	f.raidIcon:SetTexture("Interface\\TargetingFrame\\UI-RaidTargetingIcons")
+	f.raidIcon:Hide()
+
+	f.leftArrow = hb:CreateTexture(nil, "OVERLAY")
+	f.leftArrow:SetTexture("Interface\\Buttons\\UI-SpellbookIcon-NextPage-Up")
+	f.leftArrow:SetWidth(16); f.leftArrow:SetHeight(16)
+	f.leftArrow:SetPoint("RIGHT", hb, "LEFT", -4, 0)
+	f.leftArrow:Hide()
+
+	f.rightArrow = hb:CreateTexture(nil, "OVERLAY")
+	f.rightArrow:SetTexture("Interface\\Buttons\\UI-SpellbookIcon-PrevPage-Up")
+	f.rightArrow:SetWidth(16); f.rightArrow:SetHeight(16)
+	f.rightArrow:SetPoint("LEFT", hb, "RIGHT", 4, 0)
+	f.rightArrow:Hide()
+
+	-- cast bar ------------------------------------------------------------------
+	local cb = CreateFrame("StatusBar", nil, f)
+	cb:SetFrameLevel(f:GetFrameLevel() + 1)
+	cb:SetMinMaxValues(0, 1)
+	cb:Hide()
+	f.castBar = cb
+
+	cb.bg = cb:CreateTexture(nil, "BACKGROUND")
+	cb.bg:SetAllPoints(cb)
+	cb.bg:SetTexture(Util.BLANK)
+	cb.bg:SetVertexColor(0.05, 0.05, 0.05, 0.9)
+
+	cb.border = Util.CreateBorder(cb, 1)
+	cb.border:SetFrameLevel(cb:GetFrameLevel() + 2)
+
+	cb.icon = cb:CreateTexture(nil, "OVERLAY")
+	cb.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+	cb.iconBorder = Util.CreateBorder(cb, 1)   -- reused below, repositioned
+
+	cb.text = cb:CreateFontString(nil, "OVERLAY")
+	cb.text:SetPoint("LEFT", cb, "LEFT", 3, 0)
+	cb.text:SetJustifyH("LEFT")
+
+	cb.timeText = cb:CreateFontString(nil, "OVERLAY")
+	cb.timeText:SetPoint("RIGHT", cb, "RIGHT", -3, 0)
+	cb.timeText:SetJustifyH("RIGHT")
+
+	-- auras ---------------------------------------------------------------------
+	local af = CreateFrame("Frame", nil, f)
+	af:SetFrameLevel(f:GetFrameLevel() + 3)
+	af:SetWidth(1); af:SetHeight(1)
+	af.icons = {}
+	f.auraFrame = af
+
+	f.auraList = {}
+	f.plate = plate
+	return f
+end
+
+--------------------------------------------------------------------------------
+-- applying settings to a frame (only when settings actually changed)
+--------------------------------------------------------------------------------
+
+local function ApplySettings(f)
+	local db = ns.db
+	f.settingsGeneration = Core.settingsGeneration
+
+	f:SetWidth(db.width)
+	f:SetHeight(db.height)
+
+	local hb = f.healthBar
+	hb:SetWidth(db.width)
+	hb:SetHeight(db.height)
+	hb:SetStatusBarTexture(db.barTexture)
+	hb.bg:SetVertexColor(db.bgColor[1], db.bgColor[2], db.bgColor[3], db.bgColor[4])
+
+	Util.ResizeBorder(f.healthBorder, math.max(1, db.borderSize))
+	f.healthBorder:SetBackdropBorderColor(db.borderColor[1], db.borderColor[2],
+		db.borderColor[3], db.borderColor[4])
+
+	Util.SetFont(f.nameText,   db.font, db.nameSize,   db.fontOutline)
+	Util.SetFont(f.levelText,  db.font, db.levelSize,  db.fontOutline)
+	Util.SetFont(f.healthText, db.font, db.healthSize, db.fontOutline)
+
+	f.nameText:ClearAllPoints()
+	if db.nameAnchor == "CENTER" then
+		f.nameText:SetPoint("CENTER", hb, "CENTER", 0, 0)
+	elseif db.nameAnchor == "BOTTOM" then
+		f.nameText:SetPoint("TOP", hb, "BOTTOM", 0, -2)
+	else
+		f.nameText:SetPoint("BOTTOM", hb, "TOP", 0, 2)
+	end
+
+	f.raidIcon:SetWidth(db.raidIconSize)
+	f.raidIcon:SetHeight(db.raidIconSize)
+	f.raidIcon:ClearAllPoints()
+	if db.raidIconAnchor == "LEFT" then
+		f.raidIcon:SetPoint("RIGHT", hb, "LEFT", -4, 0)
+	elseif db.raidIconAnchor == "TOP" then
+		f.raidIcon:SetPoint("BOTTOM", hb, "TOP", 0, 6)
+	else
+		f.raidIcon:SetPoint("LEFT", hb, "RIGHT", 4, 0)
+	end
+
+	f.targetGlow:SetVertexColor(db.targetHighlightColor[1], db.targetHighlightColor[2],
+		db.targetHighlightColor[3], (db.targetHighlightColor[4] or 1) * 0.35)
+
+	-- cast bar
+	local cb = f.castBar
+	local c = db.castBar
+	cb:ClearAllPoints()
+	cb:SetPoint("TOP", hb, "BOTTOM", 0, c.yOffset)
+	cb:SetWidth(db.width)
+	cb:SetHeight(c.height)
+	cb:SetStatusBarTexture(db.barTexture)
+	Util.SetFont(cb.text,     db.font, c.fontSize, db.fontOutline)
+	Util.SetFont(cb.timeText, db.font, c.fontSize, db.fontOutline)
+
+	local iconSize = (c.iconSize and c.iconSize > 0) and c.iconSize or c.height
+	cb.icon:SetWidth(iconSize)
+	cb.icon:SetHeight(iconSize)
+	cb.icon:ClearAllPoints()
+	cb.icon:SetPoint("RIGHT", cb, "LEFT", -3, 0)
+	cb.iconBorder:ClearAllPoints()
+	cb.iconBorder:SetPoint("TOPLEFT", cb.icon, "TOPLEFT", -1, 1)
+	cb.iconBorder:SetPoint("BOTTOMRIGHT", cb.icon, "BOTTOMRIGHT", 1, -1)
+	cb.iconBorder:SetBackdropBorderColor(0, 0, 0, 1)
+
+	-- auras
+	local a = db.auras
+	f.auraFrame:ClearAllPoints()
+	if a.growth == "LEFT" then
+		f.auraFrame:SetPoint("BOTTOMRIGHT", hb, "TOPRIGHT", 0, a.yOffset)
+	elseif a.growth == "RIGHT" then
+		f.auraFrame:SetPoint("BOTTOMLEFT", hb, "TOPLEFT", 0, a.yOffset)
+	else
+		f.auraFrame:SetPoint("BOTTOM", hb, "TOP", 0, a.yOffset)
+	end
+	for _, icon in ipairs(f.auraFrame.icons) do
+		icon:SetWidth(a.size)
+		icon:SetHeight(a.size)
+		Util.SetFont(icon.timer,  db.font, a.timerSize, db.fontOutline)
+		Util.SetFont(icon.stacks, db.font, a.stackSize, db.fontOutline)
+	end
+
+	-- Anchor to Blizzard's health bar, not to the plate frame. A 3.3.5a plate
+	-- frame is far taller than its health bar because it reserves room for the
+	-- name and the cast bar, so plate CENTER sits well above the bar.
+	f:ClearAllPoints()
+	f:SetPoint("CENTER", f.regions.health or f.plate, "CENTER", db.xOffset, db.yOffset)
+end
+
+--------------------------------------------------------------------------------
+-- reaction / unit type
+--------------------------------------------------------------------------------
+
+local function GetReaction(r, g, b)
+	if g > 0.7 and r < 0.3 then return "friendly" end
+	if r > 0.7 and g > 0.7 then return "neutral" end
+	if r > 0.7 and g < 0.3 then return "hostile" end
+	if r > 0.4 and r < 0.7 and math.abs(r - g) < 0.15 and math.abs(g - b) < 0.15 then return "tapped" end
+	return "hostile"
+end
+
+local function GetUnitType(reaction, isPlayer)
+	if reaction == "friendly" then
+		return isPlayer and "friendlyPlayer" or "friendlyNPC"
+	elseif reaction == "neutral" then
+		return "neutralNPC"
+	else
+		return isPlayer and "enemyPlayer" or "enemyNPC"
+	end
+end
+
+--------------------------------------------------------------------------------
+-- threat
+--------------------------------------------------------------------------------
+
+local TANK_AURAS = {
+	["Defensive Stance"]  = true,
+	["Bear Form"]         = true,
+	["Dire Bear Form"]    = true,
+	["Frost Presence"]    = true,
+	["Righteous Fury"]    = true,
+}
+
+local playerIsTank = false
+local function UpdateTankState()
+	playerIsTank = false
+	for i = 1, 40 do
+		local name = UnitBuff("player", i)
+		if not name then break end
+		if TANK_AURAS[name] then playerIsTank = true break end
+	end
+end
+Util.NewTicker(1, UpdateTankState)
+
+-- returns "aggro" | "transition" | "noaggro" | nil
+local function GetThreatSituation(f, isTarget)
+	if isTarget then
+		local situation = UnitThreatSituation and UnitThreatSituation("player", "target")
+		if situation then
+			if situation >= 3 then return "aggro"
+			elseif situation >= 1 then return "transition"
+			else return "noaggro" end
+		end
+	end
+
+	local glow = f.regions.threatGlow
+	if not glow or not glow:IsShown() then return nil end
+
+	local r, g = glow:GetVertexColor()
+	if r and r > 0.8 and g and g < 0.45 then return "aggro" end
+	return "transition"
+end
+
+local function ThreatColor(situation)
+	local t = ns.db.threat
+	local tankMode = (t.mode == "tank") or (t.mode == "auto" and playerIsTank)
+
+	if tankMode then
+		-- for a tank, holding aggro is the good outcome
+		if situation == "aggro" then return t.colors.noaggro
+		elseif situation == "transition" then return t.colors.transition
+		else return t.colors.aggro end
+	else
+		if situation == "aggro" then return t.colors.aggro
+		elseif situation == "transition" then return t.colors.transition
+		else return t.colors.noaggro end
+	end
+end
+
+--------------------------------------------------------------------------------
+-- aura display
+--------------------------------------------------------------------------------
+
+local function UpdateAuras(f)
+	local db = ns.db.auras
+	local af = f.auraFrame
+
+	if not db.enabled or not f.unitCfg.showAuras then
+		for _, icon in ipairs(af.icons) do icon:Hide() end
+		af:Hide()
+		return
+	end
+
+	local token = nil
+	if f.isTarget then token = "target"
+	elseif f.isMouseover then token = "mouseover"
+	elseif UnitExists("focus") and UnitName("focus") == f.unitName then token = "focus" end
+
+	Auras.Collect(f.unitName, token, f.auraList)
+
+	local count = #f.auraList
+	local now = GetTime()
+
+	for i = 1, count do
+		local icon = af.icons[i]
+		if not icon then
+			icon = CreateAuraIcon(af, i)
+			icon:SetWidth(db.size)
+			icon:SetHeight(db.size)
+			Util.SetFont(icon.timer,  ns.db.font, db.timerSize, ns.db.fontOutline)
+			Util.SetFont(icon.stacks, ns.db.font, db.stackSize, ns.db.fontOutline)
+			af.icons[i] = icon
+		end
+
+		local aura = f.auraList[i]
+		icon.texture:SetTexture(aura.icon)
+
+		if db.borderByType then
+			icon.border:SetBackdropBorderColor(Auras.GetBorderColor(aura))
+		else
+			icon.border:SetBackdropBorderColor(0, 0, 0, 1)
+		end
+
+		if db.showStacks and aura.count and aura.count > 1 then
+			icon.stacks:SetText(aura.count)
+		else
+			icon.stacks:SetText("")
+		end
+
+		if db.showTimer and aura.expires then
+			local remain = aura.expires - now
+			icon.timer:SetText(Util.FormatTime(remain))
+			if remain <= 3 then
+				icon.timer:SetTextColor(1, 0.3, 0.3)
+			else
+				icon.timer:SetTextColor(1, 1, 1)
+			end
+		else
+			icon.timer:SetText("")
+		end
+
+		icon:Show()
+	end
+
+	for i = count + 1, #af.icons do af.icons[i]:Hide() end
+
+	if count == 0 then
+		af:Hide()
+		return
+	end
+
+	-- lay the row out
+	local perRow = math.max(1, db.perRow)
+	local step = db.size + db.spacing
+	local inRow = math.min(count, perRow)
+	local rowWidth = inRow * step - db.spacing
+
+	af:SetWidth(rowWidth)
+	af:SetHeight(db.size * math.ceil(count / perRow))
+
+	for i = 1, count do
+		local icon = af.icons[i]
+		local col = (i - 1) % perRow
+		local row = math.floor((i - 1) / perRow)
+		icon:ClearAllPoints()
+		if db.growth == "LEFT" then
+			icon:SetPoint("BOTTOMRIGHT", af, "BOTTOMRIGHT", -col * step, row * step)
+		else
+			-- CENTER and RIGHT both grow rightwards; the frame itself is anchored
+			-- to the middle of the plate and sized to the row, so this centres.
+			icon:SetPoint("BOTTOMLEFT", af, "BOTTOMLEFT", col * step, row * step)
+		end
+	end
+
+	af:Show()
+end
+
+--------------------------------------------------------------------------------
+-- cast bar
+--------------------------------------------------------------------------------
+
+local function UpdateCastBar(f)
+	local db = ns.db.castBar
+	local cb = f.castBar
+	local orig = f.regions.cast
+
+	if not db.enabled or not f.unitCfg.showCast or not orig or not orig:IsShown() then
+		if cb:IsShown() then cb:Hide() end
+		f.isCasting = false
+		f.castName, f.castIcon, f.castNoInterrupt = nil, nil, nil
+		f.prevCastValue = nil
+		return
+	end
+
+	local minValue, maxValue = orig:GetMinMaxValues()
+	local value = orig:GetValue()
+	if not value or not maxValue or maxValue <= 0 then
+		cb:Hide()
+		f.isCasting = false
+		return
+	end
+
+	local channeling = false
+	if f.prevCastValue and value < f.prevCastValue - 0.001 then channeling = true end
+	f.prevCastValue = value
+	f.isChanneling = channeling
+
+	cb:SetMinMaxValues(minValue, maxValue)
+	cb:SetValue(value)
+
+	local noInterrupt = f.regions.castNoStop and f.regions.castNoStop:IsShown()
+	local color
+	if noInterrupt then
+		color = db.noInterruptColor
+	elseif channeling then
+		color = db.channelColor
+	else
+		color = db.color
+	end
+	cb:SetStatusBarColor(color[1], color[2], color[3])
+
+	local spellName = f.regions.spellText and f.regions.spellText:GetText() or ""
+	cb.text:SetText(db.showName and spellName or "")
+
+	if db.showTime then
+		local remain = channeling and value or (maxValue - value)
+		cb.timeText:SetText(string.format("%.1f", math.max(0, remain)))
+	else
+		cb.timeText:SetText("")
+	end
+
+	if db.showIcon and f.regions.spellIcon then
+		local tex = f.regions.spellIcon:GetTexture()
+		if tex then
+			cb.icon:SetTexture(tex)
+			cb.icon:Show()
+			cb.iconBorder:Show()
+		else
+			cb.icon:Hide()
+			cb.iconBorder:Hide()
+		end
+	else
+		cb.icon:Hide()
+		cb.iconBorder:Hide()
+	end
+
+	f.isCasting = true
+	f.castName = spellName
+	f.castIcon = cb.icon:GetTexture()
+	f.castNoInterrupt = noInterrupt and true or false
+
+	if not cb:IsShown() then cb:Show() end
+end
+
+--------------------------------------------------------------------------------
+-- the per-plate update
+--------------------------------------------------------------------------------
+
+local function TruncateName(name)
+	local db = ns.db
+	if db.abbreviateNames then
+		local words = {}
+		for word in name:gmatch("%S+") do words[#words + 1] = word end
+		if #words > 1 then
+			for i = 1, #words - 1 do
+				words[i] = words[i]:sub(1, 1) .. "."
+			end
+			name = table.concat(words, " ")
+		end
+	end
+	if db.maxNameLength > 0 and name:len() > db.maxNameLength then
+		name = name:sub(1, db.maxNameLength) .. ".."
+	end
+	return name
+end
+
+local function UpdatePlate(f)
+	local db = ns.db
+	local r = f.regions
+
+	if f.settingsGeneration ~= Core.settingsGeneration then ApplySettings(f) end
+
+	-- Plates are recycled between units and the client can restore its own
+	-- artwork when that happens, so re-blank it periodically instead of
+	-- trusting the single pass we do at show time.
+	f.hideElapsed = (f.hideElapsed or 0) + (Core.tickInterval or 0.03)
+	if f.hideElapsed >= 0.5 then
+		f.hideElapsed = 0
+		HideBlizzardArt(r)
+	end
+
+	-- identity ---------------------------------------------------------------
+	local name = r.name and r.name:GetText() or ""
+	f.unitName = name
+
+	local isPlayer = Cache.IsPlayer(name)
+	local class    = Cache.GetClass(name)
+	f.unitClass = class
+
+	local br, bg, bb = r.health:GetStatusBarColor()
+	local reaction = GetReaction(br, bg, bb)
+	f.reaction = reaction
+
+	local unitType = GetUnitType(reaction, isPlayer)
+	f.unitType = unitType
+	local cfg = db.units[unitType]
+	f.unitCfg = cfg
+
+	if not db.enabled or not cfg.show then
+		if f:IsShown() then f:Hide() end
+		return
+	end
+
+	-- target / mouseover ------------------------------------------------------
+	local hasTarget = UnitExists("target")
+	local isTarget = false
+	if hasTarget and f.plate:GetAlpha() >= 0.99 then
+		isTarget = (UnitName("target") == name)
+	end
+	f.isTarget = isTarget
+	f.isMouseover = (r.highlight and r.highlight:IsShown()) and true or false
+
+	-- health ------------------------------------------------------------------
+	local health = r.health:GetValue() or 0
+	local minH, maxH = r.health:GetMinMaxValues()
+	maxH = (maxH and maxH > 0) and maxH or 1
+	f.health, f.maxHealth = health, maxH
+	local percent = health / maxH * 100
+
+	f.healthBar:SetMinMaxValues(0, maxH)
+	f.healthBar:SetValue(health)
+
+	-- threat ------------------------------------------------------------------
+	local situation = nil
+	if db.threat.enabled then
+		situation = GetThreatSituation(f, isTarget)
+	end
+	f.threatSituation = situation
+
+	-- color -------------------------------------------------------------------
+	local cr, cg, cb2
+	if reaction == "tapped" then
+		cr, cg, cb2 = unpack(Util.ReactionColors.tapped)
+	elseif cfg.colorMode == "custom" then
+		cr, cg, cb2 = unpack(cfg.customColor)
+	elseif cfg.colorMode == "class" and class then
+		cr, cg, cb2 = Util.GetClassColor(class)
+	elseif cfg.colorMode == "threat" and situation then
+		cr, cg, cb2 = unpack(ThreatColor(situation))
+	else
+		cr, cg, cb2 = unpack(Util.ReactionColors[reaction] or Util.ReactionColors.hostile)
+	end
+
+	if db.showExecuteRange and reaction ~= "friendly" and percent <= db.executeRange then
+		cr, cg, cb2 = unpack(db.executeColor)
+	end
+
+	f.healthBar:SetStatusBarColor(cr, cg, cb2)
+	f.baseColor = f.baseColor or {}
+	f.baseColor[1], f.baseColor[2], f.baseColor[3] = cr, cg, cb2
+
+	-- border / target highlight ------------------------------------------------
+	if isTarget and db.targetHighlight then
+		local c = db.targetHighlightColor
+		f.healthBorder:SetBackdropBorderColor(c[1], c[2], c[3], c[4] or 1)
+		f.targetGlow:Show()
+	else
+		local c = db.borderColor
+		f.healthBorder:SetBackdropBorderColor(c[1], c[2], c[3], c[4] or 1)
+		f.targetGlow:Hide()
+	end
+
+	if isTarget and db.targetIndicator then
+		f.leftArrow:Show(); f.rightArrow:Show()
+	else
+		f.leftArrow:Hide(); f.rightArrow:Hide()
+	end
+
+	-- text ---------------------------------------------------------------------
+	if cfg.showName then
+		f.nameText:SetText(TruncateName(name))
+		f.nameText:Show()
+		if cfg.colorMode == "class" and class then
+			f.nameText:SetTextColor(Util.GetClassColor(class))
+		else
+			f.nameText:SetTextColor(1, 1, 1)
+		end
+	else
+		f.nameText:Hide()
+	end
+
+	if cfg.showLevel and r.level then
+		local levelText = r.level:GetText()
+		local isBoss = r.bossIcon and r.bossIcon:IsShown()
+		local isElite = r.eliteIcon and r.eliteIcon:IsShown()
+		if isBoss then
+			f.levelText:SetText("??")
+			f.levelText:SetTextColor(1, 0.1, 0.1)
+		elseif levelText then
+			f.levelText:SetText(levelText .. ((isElite and db.showEliteIcon) and "+" or ""))
+			f.levelText:SetTextColor(r.level:GetTextColor())
+		else
+			f.levelText:SetText("")
+		end
+		f.levelText:Show()
+	else
+		f.levelText:Hide()
+	end
+
+	local mode = cfg.healthText
+	if mode == "none" then
+		f.healthText:SetText("")
+	elseif mode == "percent" then
+		f.healthText:SetText(string.format("%d%%", percent))
+	elseif mode == "current" then
+		f.healthText:SetText(Util.ShortNumber(health))
+	else
+		f.healthText:SetText(string.format("%s  %d%%", Util.ShortNumber(health), percent))
+	end
+
+	-- raid icon -----------------------------------------------------------------
+	if db.showRaidIcon and r.raidIcon and r.raidIcon:IsShown() then
+		f.raidIcon:SetTexCoord(r.raidIcon:GetTexCoord())
+		f.raidIcon:Show()
+	else
+		f.raidIcon:Hide()
+	end
+
+	-- cast + auras ---------------------------------------------------------------
+	UpdateCastBar(f)
+
+	f.auraElapsed = (f.auraElapsed or 0) + (Core.tickInterval or 0.03)
+	if f.auraElapsed >= 0.1 or f.forceAuraUpdate then
+		f.auraElapsed = 0
+		f.forceAuraUpdate = nil
+		UpdateAuras(f)
+	end
+
+	-- frame level so the target sits above everything else ------------------------
+	local wantLevel = isTarget and 8 or 1
+	if f:GetFrameLevel() ~= wantLevel then
+		f:SetFrameLevel(wantLevel)
+		f.healthBar:SetFrameLevel(wantLevel + 1)
+		f.healthBorder:SetFrameLevel(wantLevel + 2)
+		f.castBar:SetFrameLevel(wantLevel + 1)
+		f.castBar.border:SetFrameLevel(wantLevel + 2)
+		f.auraFrame:SetFrameLevel(wantLevel + 3)
+	end
+
+	-- scripts ---------------------------------------------------------------------
+	f.scriptScale, f.scriptAlpha = nil, nil
+	Scripting.RunHook("OnUpdate", f)
+
+	-- final scale / alpha ----------------------------------------------------------
+	local scale = db.scale * cfg.scale * (isTarget and db.targetScale or 1)
+	if f.scriptScale then scale = f.scriptScale end
+	if math.abs((f.curScale or 0) - scale) > 0.001 then
+		f:SetScale(scale)
+		f.curScale = scale
+	end
+
+	local alpha
+	if not hasTarget then
+		alpha = db.noTargetAlpha
+	elseif isTarget then
+		alpha = db.targetAlpha
+	else
+		alpha = db.nonTargetAlpha
+	end
+	alpha = alpha * cfg.alpha
+	if f.scriptAlpha then alpha = f.scriptAlpha end
+	if math.abs((f.curAlpha or -1) - alpha) > 0.001 then
+		f:SetAlpha(alpha)
+		f.curAlpha = alpha
+	end
+
+	if not f:IsShown() then f:Show() end
+end
+
+--------------------------------------------------------------------------------
+-- plate lifecycle
+--------------------------------------------------------------------------------
+
+local function OnPlateShow(plate)
+	local f = Core.active[plate]
+	if not f then return end
+
+	HideBlizzardArt(f.regions)
+
+	f.prevCastValue = nil
+	f.forceAuraUpdate = true
+	f.curAlpha, f.curScale = nil, nil
+	f.scriptColor, f.scriptBorderColor, f.scriptName = nil, nil, nil
+
+	if f.constructorGeneration ~= constructorGeneration then
+		f.constructorGeneration = constructorGeneration
+		f.unitName = f.regions.name and f.regions.name:GetText() or ""
+		Scripting.RunHook("Constructor", f)
+	end
+
+	f.unitName = f.regions.name and f.regions.name:GetText() or ""
+	Scripting.RunHook("OnShow", f)
+
+	UpdatePlate(f)
+end
+
+local function OnPlateHide(plate)
+	local f = Core.active[plate]
+	if not f then return end
+	Scripting.RunHook("OnHide", f)
+	f:Hide()
+end
+
+local function InitializePlate(plate)
+	if Core.allPlates[plate] then return end
+	Core.allPlates[plate] = true
+
+	local regions = ClassifyPlate(plate)
+	if not regions.health then return end
+
+	local f = CreateUnitFrame(plate)
+	f.regions = regions
+	Core.active[plate] = f
+
+	HideBlizzardArt(regions)
+	ApplySettings(f)
+
+	plate:HookScript("OnShow", OnPlateShow)
+	plate:HookScript("OnHide", OnPlateHide)
+
+	if plate:IsShown() then OnPlateShow(plate) end
+end
+
+--------------------------------------------------------------------------------
+-- WorldFrame scanning + main loop
+--------------------------------------------------------------------------------
+
+local lastChildCount = 0
+
+local function ScanWorldFrame()
+	local count = WorldFrame:GetNumChildren()
+	if count == lastChildCount then return end
+	lastChildCount = count
+
+	for i = 1, count do
+		local child = select(i, WorldFrame:GetChildren())
+		if child and not child.plwChecked then
+			child.plwChecked = true
+			if IsNamePlate(child) then
+				InitializePlate(child)
+			end
+		end
+	end
+end
+
+Core.settingsGeneration = 1
+Core.tickInterval = 0.03
+
+local runner = CreateFrame("Frame")
+local sinceUpdate, sinceScan = 0, 0
+
+runner:SetScript("OnUpdate", function(self, elapsed)
+	-- nothing may touch plates before the saved variables are loaded
+	if not ns.db then return end
+
+	sinceScan = sinceScan + elapsed
+	if sinceScan >= 0.1 then
+		sinceScan = 0
+		local ok, err = pcall(ScanWorldFrame)
+		if not ok then Util.Error(err) end
+	end
+
+	sinceUpdate = sinceUpdate + elapsed
+	if sinceUpdate < ns.db.updateInterval then return end
+	Core.tickInterval = sinceUpdate
+	sinceUpdate = 0
+
+	for plate, f in pairs(Core.active) do
+		if plate:IsShown() then
+			local ok, err = pcall(UpdatePlate, f)
+			if not ok then Util.Error(err) end
+		elseif f:IsShown() then
+			f:Hide()
+		end
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- public helpers
+--------------------------------------------------------------------------------
+
+function Core.FullUpdate()
+	Core.settingsGeneration = Core.settingsGeneration + 1
+	for _, f in pairs(Core.active) do
+		f.curAlpha, f.curScale = nil, nil
+		f.forceAuraUpdate = true
+	end
+end
+
+function Core.InvalidateConstructors()
+	constructorGeneration = constructorGeneration + 1
+end
+
+-- Prints the exact widget layout of one live nameplate. This is how we find
+-- out where a given client build keeps the border, name and level artwork
+-- instead of assuming a region order.
+function Core.DebugDump()
+	local target
+	for plate, f in pairs(Core.active) do
+		if plate:IsShown() then target = plate break end
+	end
+	if not target then
+		Util.Print("no visible nameplate to dump - get a mob on screen first.")
+		return
+	end
+
+	local f = Core.active[target]
+
+	local function describe(region)
+		local kind = region:GetObjectType()
+		local detail
+		if kind == "FontString" then
+			detail = "text=" .. tostring(region:GetText())
+		else
+			local path = region:GetTexture()
+			detail = "tex=" .. tostring(path) .. " blend=" .. tostring(region:GetBlendMode())
+		end
+		return string.format("      %s  %s  shown=%s alpha=%.2f",
+			kind, detail, tostring(region:IsShown()), region:GetAlpha())
+	end
+
+	local function dumpFrame(label, frame)
+		if not frame then Util.Print("  " .. label .. ": nil") return end
+		Util.Print(string.format("  %s: %s %dx%d alpha=%.2f regions=%d",
+			label, frame:GetObjectType(), frame:GetWidth(), frame:GetHeight(),
+			frame:GetAlpha(), select("#", frame:GetRegions())))
+		for i = 1, select("#", frame:GetRegions()) do
+			Util.Print(describe((select(i, frame:GetRegions()))))
+		end
+	end
+
+	Util.Print("---- nameplate dump ----")
+	Util.Print(string.format("  plate: %dx%d alpha=%.2f children=%d",
+		target:GetWidth(), target:GetHeight(), target:GetAlpha(), target:GetNumChildren()))
+	dumpFrame("plate regions", target)
+	dumpFrame("health", f.regions.health)
+	dumpFrame("cast", f.regions.cast)
+	Util.Print(string.format("  classified: name=%s level=%s border=%s glow=%s highlight=%s raid=%s",
+		tostring(f.regions.name ~= nil), tostring(f.regions.level ~= nil),
+		tostring(f.regions.healthBorder ~= nil), tostring(f.regions.threatGlow ~= nil),
+		tostring(f.regions.highlight ~= nil), tostring(f.regions.raidIcon ~= nil)))
+	Util.Print(string.format("  total regions blanked: %d", #(f.regions.allRegions or {})))
+	Util.Print("---- end ----")
+end
+
+function Core.GetPlateByName(name)
+	for _, f in pairs(Core.active) do
+		if f:IsShown() and f.unitName == name then return f end
+	end
+	return nil
+end
+
+--------------------------------------------------------------------------------
+-- cvars so plate geometry stays constant
+--------------------------------------------------------------------------------
+
+local function ApplyCVars()
+	if not ns.db.forceBlizzardCVars then return end
+	for _, cvar in ipairs({ "bloatnameplates", "bloattest", "bloatthreat" }) do
+		pcall(SetCVar, cvar, "0")
+	end
+	pcall(SetCVar, "ShowClassColorInNameplate", "1")
+end
+
+Core.ApplyCVars = ApplyCVars
+
+--------------------------------------------------------------------------------
+-- startup
+--------------------------------------------------------------------------------
+
+local boot = CreateFrame("Frame")
+boot:RegisterEvent("ADDON_LOADED")
+boot:RegisterEvent("PLAYER_ENTERING_WORLD")
+boot:SetScript("OnEvent", function(self, event, arg1)
+	if event == "ADDON_LOADED" and arg1 == ADDON then
+		ns.Config.Initialize()
+		ns.Scripting.InstallExamples()
+		ns.Scripting.CompileAll()
+		if ns.Options and ns.Options.Initialize then ns.Options.Initialize() end
+	elseif event == "PLAYER_ENTERING_WORLD" then
+		if not ns.db then ns.Config.Initialize() end
+		ApplyCVars()
+		Cache.LearnUnit("player")
+		Cache.ScanGroup()
+		Core.FullUpdate()
+	end
+end)

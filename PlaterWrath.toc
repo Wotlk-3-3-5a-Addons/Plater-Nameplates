@@ -1,0 +1,16 @@
+## Interface: 30300
+## Title: Plater Nameplates |cff44aaff(Wrath)|r
+## Notes: Highly customizable nameplates with threat coloring, aura tracking, cast bars and Lua scripting.|nA native 3.3.5a engine built in the style of Plater.
+## Author: PlaterWrath
+## Version: 1.0.0
+## SavedVariables: PlaterWrathDB
+## SavedVariablesPerCharacter: PlaterWrathCharDB
+## X-Category: Unit Frames
+
+Util.lua
+Config.lua
+Cache.lua
+Auras.lua
+Scripting.lua
+Core.lua
+Options.lua
