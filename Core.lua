@@ -1766,6 +1766,33 @@ function Core.DebugDump()
 	Util.Print("---- end ----")
 end
 
+-- Other addons that draw on WotLK nameplates. Anything they add is their
+-- artwork, not ours, so it does not answer to this addon's filters - which
+-- looks exactly like a blacklist that refuses to work.
+local NAMEPLATE_ADDONS = {
+	"PlateBuffs", "TidyPlates", "Aloft", "dNamePlates", "caelNamePlates",
+	"Kui_Nameplates", "TinyPlates", "NeatPlates", "ElvUI",
+}
+
+function Core.GetConflicts()
+	local found
+	for _, name in ipairs(NAMEPLATE_ADDONS) do
+		if IsAddOnLoaded(name) then
+			found = found or {}
+			found[#found + 1] = name
+		end
+	end
+	return found
+end
+
+function Core.CountAuraIcons()
+	local total = 0
+	for _, f in pairs(Core.active) do
+		if f:IsShown() then total = total + (f.auraCount or 0) end
+	end
+	return total
+end
+
 function Core.GetPlateByName(name)
 	for _, f in pairs(Core.active) do
 		if f:IsShown() and f.unitName == name then return f end
@@ -1806,5 +1833,14 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 		Cache.LearnUnit("player")
 		Cache.ScanGroup()
 		Core.FullUpdate()
+
+		local conflicts = Core.GetConflicts()
+		if conflicts and not Core.warnedConflicts then
+			Core.warnedConflicts = true
+			Util.Print("|cffff5555" .. table.concat(conflicts, ", ")
+				.. " is also drawing on nameplates.|r Icons it adds are its own, so they "
+				.. "ignore this addon's blacklist and cannot be removed from here. "
+				.. "Disable it if you are seeing auras that will not go away.")
+		end
 	end
 end)

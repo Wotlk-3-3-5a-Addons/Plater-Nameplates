@@ -1277,8 +1277,16 @@ SlashCmdList["PLATERWRATH"] = function(input)
 	elseif msg == "status" then
 		local n = 0
 		for _ in pairs(ns.Core.active) do n = n + 1 end
-		Util.Print(("%d plates hooked, %d mods, profile %s"):format(
-			n, Util.CountTable(ns.db.mods), ns.Config.GetActiveProfile()))
+		Util.Print(("%d plates hooked, %d aura icon(s) drawn by this addon, %d mods, profile %s"):format(
+			n, ns.Core.CountAuraIcons(), Util.CountTable(ns.db.mods), ns.Config.GetActiveProfile()))
+
+		local conflicts = ns.Core.GetConflicts()
+		if conflicts then
+			Util.Print("|cffff5555also drawing on nameplates: " .. table.concat(conflicts, ", ")
+				.. "|r - its icons are not ours and ignore our blacklist.")
+		else
+			Util.Print("no other nameplate addons loaded.")
+		end
 	else
 		Util.Print("commands: |cffffd100/plater|r config, toggle, enemy, friendly, reset, minimap, wipeauras, status, debug, errors")
 		Util.Print("auras: |cffffd100/plater auras|r lists what is tracked on your target, "
