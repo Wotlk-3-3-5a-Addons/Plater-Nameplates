@@ -102,6 +102,8 @@ function API.GetHealthPercent(unitFrame)
 	return unitFrame.health / unitFrame.maxHealth * 100
 end
 function API.GetUnitType(unitFrame)   return unitFrame and unitFrame.unitType end
+-- nil until the plate has been matched to a unit; see the Auras tab
+function API.GetGUID(unitFrame)       return unitFrame and unitFrame.unitGUID end
 function API.GetReaction(unitFrame)   return unitFrame and unitFrame.reaction end
 function API.GetClass(unitFrame)      return unitFrame and unitFrame.unitClass end
 function API.IsCasting(unitFrame)     return unitFrame and unitFrame.isCasting end

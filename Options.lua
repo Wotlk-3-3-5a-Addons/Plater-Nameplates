@@ -583,7 +583,15 @@ local function BuildAuras(panel)
 	local a = function() return db().auras end
 
 	L:Add(Widgets.Header(c, "Auras"))
-	L:Add(Widgets.Text(c, "Auras on units you are not targeting are read from the combat log and matched by unit name, because 3.3.5a gives nameplates no unit token. Your target, focus and mouseover use the exact API instead."))
+	L:Add(Widgets.Text(c, "Auras come from the combat log, which identifies units by GUID. Nameplates carry no unit token, so a plate is matched to a unit the moment it is your target, mouseover or focus, and keeps that identity until the client recycles it."))
+	L:Gap()
+	L:Add(Widgets.Dropdown(c, "Match auras to units by", function()
+		return {
+			{ text = "Unit (exact)",       value = "unit" },
+			{ text = "Name (legacy)",      value = "name" },
+		}
+	end, function() return a().matching end, function(v) a().matching = v end, 200))
+	L:Add(Widgets.Text(c, "Unit is exact: a plate shows auras only once it has been matched, so target or mouse over a mob once to bind it. Name is the old behaviour and will show one mob's auras on every other mob sharing its name."))
 	L:Gap()
 	L:Add(Widgets.CheckBox(c, "Enable aura tracking", nil,
 		function() return a().enabled end, function(v) a().enabled = v end))

@@ -23,9 +23,14 @@ local band = bit.band
 local AFFILIATION_MINE = COMBATLOG_OBJECT_AFFILIATION_MINE or 0x00000001
 local REACTION_HOSTILE = COMBATLOG_OBJECT_REACTION_HOSTILE or 0x00000040
 
--- [name] = { [key] = auraTable }
+-- [guid] = { [key] = auraTable }
+--
+-- Keyed by guid, not by name. Name keying meant every mob sharing a name shared
+-- one set of auras, so a damage-over-time effect on one training dummy appeared
+-- on all of them. The combat log identifies units by guid, so the tracking does
+-- too; matching a nameplate to a guid is Core's job.
 local store = {}
--- [name] = last time we touched this bucket, used to expire dead mobs
+-- [guid] = last time we touched this bucket, used to expire dead mobs
 local touched = {}
 
 Auras.store = store
@@ -56,19 +61,20 @@ local function KeyFor(spellId, spellName, mine)
 	return (spellId or spellName or "?") .. (mine and "@m" or "@o")
 end
 
-local function Bucket(name)
-	local b = store[name]
+local function Bucket(guid)
+	local b = store[guid]
 	if not b then
 		b = {}
-		store[name] = b
+		store[guid] = b
 	end
-	touched[name] = GetTime()
+	touched[guid] = GetTime()
 	return b
 end
 
-function Auras.Wipe(name)
-	store[name] = nil
-	touched[name] = nil
+function Auras.Wipe(guid)
+	if not guid then return end
+	store[guid] = nil
+	touched[guid] = nil
 end
 
 function Auras.WipeAll()
@@ -76,10 +82,10 @@ function Auras.WipeAll()
 	for k in pairs(touched) do touched[k] = nil end
 end
 
-local function AddAura(destName, spellId, spellName, school, auraType, amount, mine)
-	if not destName or destName == "" then return end
+local function AddAura(destGUID, spellId, spellName, school, auraType, amount, mine)
+	if not destGUID or destGUID == "" then return end
 
-	local bucket = Bucket(destName)
+	local bucket = Bucket(destGUID)
 	local key = KeyFor(spellId, spellName, mine)
 	local now = GetTime()
 	local duration = Cache.GetDuration(spellId, spellName)
@@ -104,14 +110,14 @@ local function AddAura(destName, spellId, spellName, school, auraType, amount, m
 	aura.exact    = false
 end
 
-local function RemoveAura(destName, spellId, spellName, mine)
-	local bucket = store[destName]
+local function RemoveAura(destGUID, spellId, spellName, mine)
+	local bucket = destGUID and store[destGUID]
 	if not bucket then return end
 	bucket[KeyFor(spellId, spellName, mine)] = nil
 end
 
-local function SetDose(destName, spellId, spellName, mine, amount)
-	local bucket = store[destName]
+local function SetDose(destGUID, spellId, spellName, mine, amount)
+	local bucket = destGUID and store[destGUID]
 	if not bucket then return end
 	local aura = bucket[KeyFor(spellId, spellName, mine)]
 	if aura then aura.count = amount or aura.count end
@@ -132,8 +138,8 @@ clFrame:SetScript("OnEvent", function(self, event, timestamp, subEvent,
 	if event == "PLAYER_REGEN_ENABLED" then
 		-- leaving combat: drop everything that is no longer relevant
 		local now = GetTime()
-		for name, t in pairs(touched) do
-			if now - t > 5 then Auras.Wipe(name) end
+		for guid, t in pairs(touched) do
+			if now - t > 5 then Auras.Wipe(guid) end
 		end
 		return
 	end
@@ -143,7 +149,8 @@ clFrame:SetScript("OnEvent", function(self, event, timestamp, subEvent,
 	if dstName then Cache.OnCombatLogUnit(dstGUID, dstName, dstFlags, nil) end
 
 	if subEvent == "UNIT_DIED" or subEvent == "UNIT_DESTROYED" or subEvent == "PARTY_KILL" then
-		if dstName then Auras.Wipe(dstName) end
+		Auras.Wipe(dstGUID)
+		Cache.ForgetGUID(dstGUID)
 		return
 	end
 
@@ -152,18 +159,18 @@ clFrame:SetScript("OnEvent", function(self, event, timestamp, subEvent,
 	local mine = srcFlags and band(srcFlags, AFFILIATION_MINE) > 0 or false
 
 	if subEvent == "SPELL_AURA_APPLIED" or subEvent == "SPELL_AURA_REFRESH" then
-		AddAura(dstName, spellId, spellName, spellSchool, auraType, amount, mine)
+		AddAura(dstGUID, spellId, spellName, spellSchool, auraType, amount, mine)
 
 	elseif subEvent == "SPELL_AURA_APPLIED_DOSE" then
-		AddAura(dstName, spellId, spellName, spellSchool, auraType, amount, mine)
+		AddAura(dstGUID, spellId, spellName, spellSchool, auraType, amount, mine)
 
 	elseif subEvent == "SPELL_AURA_REMOVED_DOSE" then
-		SetDose(dstName, spellId, spellName, mine, amount)
+		SetDose(dstGUID, spellId, spellName, mine, amount)
 
 	elseif subEvent == "SPELL_AURA_REMOVED"
 		or subEvent == "SPELL_AURA_BROKEN"
 		or subEvent == "SPELL_AURA_BROKEN_SPELL" then
-		RemoveAura(dstName, spellId, spellName, mine)
+		RemoveAura(dstGUID, spellId, spellName, mine)
 	end
 end)
 
@@ -173,7 +180,7 @@ end)
 
 Util.NewTicker(1, function()
 	local now = GetTime()
-	for name, bucket in pairs(store) do
+	for guid, bucket in pairs(store) do
 		local any = false
 		for key, aura in pairs(bucket) do
 			if aura.expires and aura.expires <= now then
@@ -185,9 +192,9 @@ Util.NewTicker(1, function()
 				any = true
 			end
 		end
-		if not any and (now - (touched[name] or 0)) > 30 then
-			store[name] = nil
-			touched[name] = nil
+		if not any and (now - (touched[guid] or 0)) > 30 then
+			store[guid] = nil
+			touched[guid] = nil
 		end
 	end
 end)
@@ -230,12 +237,30 @@ local function ReadUnitAuras(unit, out)
 	return n
 end
 
+-- Every aura currently tracked for any unit sharing this name. Only used when
+-- the profile explicitly asks for name matching: it is what caused one mob's
+-- auras to appear on another's nameplate.
+local function CollectByName(plateName, out)
+	for i = #out, 1, -1 do out[i] = nil end
+	local set = Cache.guidsByName[plateName]
+	if not set then return out end
+	for guid in pairs(set) do
+		local bucket = store[guid]
+		if bucket then
+			for _, aura in pairs(bucket) do out[#out + 1] = aura end
+		end
+	end
+	return out
+end
+
 -- Returns an array of aura tables for a plate.
--- `unitToken` is optional; when supplied the exact API data is used.
+-- `guid` is the unit the plate has been matched to, and is what the tracking is
+-- keyed by; without one there is no honest answer and we return nothing.
+-- `unitToken` is optional; when supplied the exact API data is used instead.
 -- `scratch` must be a table owned by the caller: the exact path writes aura
 -- tables into it and `result` holds references to them, so sharing one buffer
 -- between plates would let one plate's refresh overwrite another's timers.
-function Auras.Collect(plateName, unitToken, result, scratch)
+function Auras.Collect(guid, plateName, unitToken, result, scratch)
 	local db = ns.db.auras
 	local now = GetTime()
 
@@ -247,12 +272,19 @@ function Auras.Collect(plateName, unitToken, result, scratch)
 		local buffer = scratch or exactBuffer
 		ReadUnitAuras(unitToken, buffer)
 		source = buffer
-	else
-		local bucket = store[plateName]
-		if not bucket then return result end
+
+	elseif guid and store[guid] then
 		for i = #logBuffer, 1, -1 do logBuffer[i] = nil end
-		for _, aura in pairs(bucket) do logBuffer[#logBuffer + 1] = aura end
+		for _, aura in pairs(store[guid]) do logBuffer[#logBuffer + 1] = aura end
 		source = logBuffer
+
+	elseif db.matching == "name" then
+		source = CollectByName(plateName, logBuffer)
+
+	else
+		-- No unit matched, and we are not willing to guess. Showing another
+		-- unit's auras here is worse than showing none.
+		return result
 	end
 
 	local n = 0

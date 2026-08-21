@@ -121,6 +121,10 @@ ns.defaults = {
 		showBuffs   = true,
 		showDebuffs = true,
 		filter      = "mine",         -- mine | all | whitelist
+		-- "unit" shows a plate's auras only once it has been matched to an
+		-- actual unit. "name" falls back to matching by unit name, which puts
+		-- one mob's auras on every other mob sharing its name.
+		matching    = "unit",         -- unit | name
 		showStacks  = true,
 		showTimer   = true,
 		timerSize   = 9,

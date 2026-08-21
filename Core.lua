@@ -932,7 +932,7 @@ local function UpdateAuras(f)
 	elseif f.isMouseover then token = "mouseover"
 	elseif UnitExists("focus") and UnitName("focus") == f.unitName then token = "focus" end
 
-	Auras.Collect(f.unitName, token, f.auraList, f.auraScratch)
+	Auras.Collect(f.unitGUID, f.unitName, token, f.auraList, f.auraScratch)
 
 	local count = #f.auraList
 	f.auraCount = count
@@ -1193,6 +1193,36 @@ local function UpdatePlate(f)
 	f.isTarget = isTarget
 	f.isMouseover = (r.highlight and r.highlight:IsShown()) and true or false
 
+	-- Match the plate to an actual unit.
+	--
+	-- A nameplate carries no unit token, but whenever it happens to be the unit
+	-- we are targeting, hovering or focusing we can read its guid exactly, and
+	-- a plate keeps serving the same unit until the client recycles it. So one
+	-- moment of contact binds it for as long as it lives, which is enough:
+	-- casting anything at a mob means targeting it first.
+	local guid
+	if isTarget then
+		guid = UnitGUID("target")
+	elseif f.isMouseover then
+		guid = UnitGUID("mouseover")
+	elseif UnitExists("focus") and UnitName("focus") == name then
+		guid = UnitGUID("focus")
+	end
+
+	if guid then
+		f.unitGUID, f.guidName = guid, name
+	elseif f.unitGUID and f.guidName ~= name then
+		-- recycled onto a different unit; the old binding is meaningless now
+		f.unitGUID, f.guidName = nil, nil
+	end
+
+	if not f.unitGUID then
+		-- only when the name is unambiguous: with two mobs sharing a name there
+		-- is no safe answer, and guessing is the bug this replaced
+		local unique = Cache.UniqueGUIDForName(name)
+		if unique then f.unitGUID, f.guidName = unique, name end
+	end
+
 	-- health ------------------------------------------------------------------
 	local health = r.health:GetValue() or 0
 	local minH, maxH = r.health:GetMinMaxValues()
@@ -1380,6 +1410,9 @@ local function OnPlateShow(plate)
 	-- drop the easing history so it snaps into place instead of gliding there
 	f.smoothX, f.smoothY = nil, nil
 	f.scriptColor, f.scriptBorderColor, f.scriptName = nil, nil, nil
+	-- a recycled plate serves a different unit; drop the old identity so it
+	-- cannot inherit the previous occupant's auras
+	f.unitGUID, f.guidName = nil, nil
 
 	if f.constructorGeneration ~= constructorGeneration then
 		f.constructorGeneration = constructorGeneration

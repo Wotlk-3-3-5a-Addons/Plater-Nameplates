@@ -20,9 +20,15 @@ ns.Cache = Cache
 
 Cache.class      = {}   -- [name] = "MAGE"
 Cache.isPlayer   = {}   -- [name] = true/false
-Cache.guid       = {}   -- [name] = guid
+Cache.guid       = {}   -- [name] = most recently seen guid with that name
 Cache.duration   = {}   -- [spellId] = duration learned from a real UnitAura scan
 Cache.icon       = {}   -- [spellId] = icon path
+
+-- Several units can share a name - four wolves, a row of training dummies - so
+-- one name maps to a set of guids, not a single one. Aura tracking depends on
+-- telling them apart, so keep both directions.
+Cache.guidsByName = {}  -- [name] = { [guid] = lastSeen }
+Cache.nameByGUID  = {}  -- [guid] = name
 
 local band = bit.band
 local TYPE_PLAYER = COMBATLOG_OBJECT_TYPE_PLAYER or 0x00000400
@@ -168,7 +174,7 @@ function Cache.LearnUnit(unit)
 
 	local isPlayer = UnitIsPlayer(unit) and true or false
 	Cache.isPlayer[name] = isPlayer
-	Cache.guid[name] = UnitGUID(unit)
+	Cache.SeeUnit(UnitGUID(unit), name)
 
 	if isPlayer then
 		local _, class = UnitClass(unit)
@@ -216,9 +222,53 @@ end
 -- learning from the combat log
 --------------------------------------------------------------------------------
 
+function Cache.SeeUnit(guid, name)
+	if not guid or guid == "" or not name or name == "" then return end
+	Cache.guid[name] = guid
+	Cache.nameByGUID[guid] = name
+	local set = Cache.guidsByName[name]
+	if not set then
+		set = {}
+		Cache.guidsByName[name] = set
+	end
+	set[guid] = GetTime()
+end
+
+function Cache.ForgetGUID(guid)
+	if not guid then return end
+	local name = Cache.nameByGUID[guid]
+	if name and Cache.guidsByName[name] then
+		Cache.guidsByName[name][guid] = nil
+	end
+	Cache.nameByGUID[guid] = nil
+end
+
+function Cache.GetNameForGUID(guid)
+	return guid and Cache.nameByGUID[guid]
+end
+
+-- The guid for this name, but only when there is exactly one candidate that has
+-- been seen recently. With two mobs sharing a name there is no safe answer, and
+-- guessing is what put one mob's damage-over-time icons on another's nameplate.
+function Cache.UniqueGUIDForName(name)
+	local set = name and Cache.guidsByName[name]
+	if not set then return nil end
+
+	local cutoff = GetTime() - 60
+	local found, count = nil, 0
+	for guid, seen in pairs(set) do
+		if seen >= cutoff then
+			count = count + 1
+			if count > 1 then return nil end
+			found = guid
+		end
+	end
+	return found
+end
+
 function Cache.OnCombatLogUnit(guid, name, flags, spellName)
 	if not name or name == "" then return end
-	if guid and guid ~= "" then Cache.guid[name] = guid end
+	Cache.SeeUnit(guid, name)
 
 	if flags then
 		local isPlayer = band(flags, TYPE_PLAYER) > 0
@@ -302,5 +352,24 @@ end)
 Util.NewTicker(2, function()
 	for _, unit in ipairs(SCAN_UNITS) do
 		if UnitExists(unit) then Cache.LearnUnit(unit) end
+	end
+end)
+
+-- Drop guids we have not seen in a while. Without this the name-to-guid sets
+-- only ever grow, and a name that has had many mobs through it would never look
+-- unambiguous again, so plates for a lone mob of that name would stop matching.
+Util.NewTicker(20, function()
+	local cutoff = GetTime() - 120
+	for name, set in pairs(Cache.guidsByName) do
+		local remaining = 0
+		for guid, seen in pairs(set) do
+			if seen < cutoff then
+				set[guid] = nil
+				Cache.nameByGUID[guid] = nil
+			else
+				remaining = remaining + 1
+			end
+		end
+		if remaining == 0 then Cache.guidsByName[name] = nil end
 	end
 end)

@@ -89,10 +89,15 @@ Script API (`Plater.` or `PlaterW.`): `SetNameplateColor`, `ResetNameplateColor`
 
 ## Known limits — all of them are the client, not the addon
 
-1. **Auras are matched by unit name.** For anything that is not your target, focus or
-   mouseover, aura state comes from the combat log, which identifies units by name. Two
-   mobs with the same name in range share one aura bucket. Your target, focus and
-   mouseover use the exact `UnitAura` API instead, so they are always correct.
+1. **A plate has to be matched to a unit before it can show auras.** The combat log
+   identifies units by GUID, and aura tracking is keyed the same way, so two mobs
+   sharing a name never share auras. But a nameplate carries no unit token, so the
+   addon binds a plate to a GUID the moment that plate is your target, mouseover or
+   focus, and keeps it until the client recycles the plate. One moment of contact is
+   enough, and casting anything at a mob means targeting it first. A plate for a
+   uniquely-named mob is matched immediately. Until a plate is matched it shows no
+   auras — showing another unit's is worse than showing none. Auras → *Match auras to
+   units by* restores the old name-based behaviour if you prefer it.
 2. **Aura durations are learned, not given.** The combat log never reports duration. The
    addon caches real durations whenever a unit passes through your target/focus/mouseover
    and falls back to a table of common WotLK spells. An unknown aura shows its icon with
