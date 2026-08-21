@@ -317,8 +317,37 @@ end
 --------------------------------------------------------------------------------
 
 local function CreateAuraIcon(parent, index)
-	local icon = CreateFrame("Frame", nil, parent)
+	-- A Button rather than a Frame so the icon can answer the one question its
+	-- artwork cannot: what is this. Several spells share a texture, and a
+	-- blacklist that matches on exact names is unusable if the names are not
+	-- visible anywhere.
+	local icon = CreateFrame("Button", nil, parent)
 	icon:SetFrameLevel(parent:GetFrameLevel() + 1)
+	icon:RegisterForClicks("RightButtonUp")
+
+	icon:SetScript("OnEnter", function(self)
+		if not self.auraName then return end
+		GameTooltip:SetOwner(self, "ANCHOR_BOTTOMRIGHT")
+		local shown = false
+		if self.spellId then
+			shown = pcall(GameTooltip.SetHyperlink, GameTooltip, "spell:" .. self.spellId)
+		end
+		if not shown then GameTooltip:SetText(self.auraName, 1, 1, 1) end
+		GameTooltip:AddLine(" ")
+		GameTooltip:AddLine("|cff88bbffRight click|r to hide this aura on nameplates.", 1, 1, 1)
+		GameTooltip:Show()
+	end)
+
+	icon:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+	icon:SetScript("OnClick", function(self)
+		if not self.auraName then return end
+		ns.db.auras.blacklist[self.auraName] = true
+		Core.FullUpdate()
+		GameTooltip:Hide()
+		Util.Print(("|cffffd100%s|r hidden. |cffffd100/plater unblacklist %s|r puts it back.")
+			:format(self.auraName, self.auraName))
+	end)
 
 	icon.texture = icon:CreateTexture(nil, "ARTWORK")
 	icon.texture:SetAllPoints(icon)
@@ -952,6 +981,9 @@ local function UpdateAuras(f)
 
 		local aura = f.auraList[i]
 		icon.texture:SetTexture(aura.icon)
+		icon.auraName = aura.name
+		icon.spellId  = aura.spellId
+		icon:EnableMouse(db.interactive and true or false)
 
 		if db.borderByType then
 			icon.border:SetBackdropBorderColor(Auras.GetBorderColor(aura))

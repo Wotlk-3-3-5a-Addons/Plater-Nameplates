@@ -633,6 +633,9 @@ local function BuildAuras(panel)
 		function() return a().showStacks end, function(v) a().showStacks = v end))
 	L:Add(Widgets.CheckBox(c, "Color icon border by school", nil,
 		function() return a().borderByType end, function(v) a().borderByType = v end))
+	L:Add(Widgets.CheckBox(c, "Hover icons for the spell, right click to hide it", nil,
+		function() return a().interactive end, function(v) a().interactive = v end))
+	L:Add(Widgets.Text(c, "Several spells share the same artwork, so hovering an icon is the reliable way to learn what it actually is. The cost is a small area above each health bar that catches the mouse."))
 
 	L:Gap()
 	L:Add(Widgets.Header(c, "Spell lists"))

@@ -133,6 +133,9 @@ ns.defaults = {
 		timerRate      = 0.03,    -- how often aura timers redraw, seconds
 		stackSize   = 10,
 		borderByType= true,           -- color icon border by debuff school
+		-- hover an icon for the spell's tooltip, right click to blacklist it.
+		-- Costs a small mouse-catching area above each health bar.
+		interactive = true,
 		blacklist   = {},             -- [spellName] = true
 		whitelist   = {},             -- [spellName] = true
 	},
