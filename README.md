@@ -5,6 +5,19 @@ written natively for the 3.3.5a client (Warmane and other WotLK realms).
 
 `/plater` or `/plw` opens the options. There is also a minimap button.
 
+## Install
+
+The folder name must be `PlaterWrath`, because the client only loads a `.toc`
+whose name matches its folder. Cloning this repository gives you a folder named
+after the repository, so rename it:
+
+```
+git clone https://github.com/Wotlk-3-3-5a-Addons/Plater-Nameplates.git PlaterWrath
+```
+
+Place that `PlaterWrath` folder in `World of Warcraft 3.3.5a\Interface\AddOns\`,
+then `/reload` or restart the client. Requires interface version 30300.
+
 ---
 
 ## Why this is a rewrite and not a port
