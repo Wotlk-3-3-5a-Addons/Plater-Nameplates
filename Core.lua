@@ -648,11 +648,14 @@ local function ComputeTarget(f)
 		return false
 	end
 
+	-- Screen pixels, and deliberately without the user's offsets: these values
+	-- exist to compare plates against each other, and an offset every plate
+	-- shares cannot change which of them collide.
 	local ps = health:GetEffectiveScale()
 	local fs = f:GetEffectiveScale()
 
-	f.baseX = hx * ps + db.xOffset * fs
-	f.baseY = hy * ps + db.yOffset * fs
+	f.baseX = hx * ps
+	f.baseY = hy * ps
 
 	-- The footprint is what the plate actually occupies on screen, not just the
 	-- bar: the name is drawn above the bar and is often wider than it, so two
@@ -745,9 +748,26 @@ local function ApplyPosition(f, dt)
 		f.smoothY = f.smoothY + (targetY - f.smoothY) * k
 	end
 
+	-- Anchor to Blizzard's health bar and express everything else as a delta
+	-- from it.
+	--
+	-- Placing the frame at an absolute screen position measured from
+	-- WorldFrame's bottom-left assumed that corner is screen (0,0) and that the
+	-- pixels-to-frame-units conversion is exact, and got both slightly wrong, so
+	-- plates landed a long way to the side of their unit - the further from the
+	-- corner, the bigger the miss. Anchoring to the widget we are replacing
+	-- makes the base position correct by construction, and only the easing lag,
+	-- the stacking lift and the user's offsets pass through a scale conversion.
+	-- Those are small, so any error in them is small too.
+	local health = f.regions.health
+	if not health then return end
+
 	local fs = f:GetEffectiveScale()
+	local dx = (f.smoothX - f.baseX) / fs + db.xOffset
+	local dy = (f.smoothY - f.baseY) / fs + db.yOffset
+
 	f:ClearAllPoints()
-	f:SetPoint("CENTER", WorldFrame, "BOTTOMLEFT", f.smoothX / fs, f.smoothY / fs)
+	f:SetPoint("CENTER", health, "CENTER", dx, dy)
 end
 
 --------------------------------------------------------------------------------
